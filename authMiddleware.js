@@ -30,6 +30,27 @@ export async function requireAuth(req, res, next) {
   }
 }
 
+// Valida que el tenantId del request coincida con el del token.
+// Los superadmin pueden acceder a cualquier tenant.
+export function requireTenantMatch(req, res, next) {
+  const tokenTenant = req.user?.tenantId;
+  const requestedTenant =
+    req.headers['x-tenant-id'] ||
+    req.body?.tenantId ||
+    req.query?.tenantId;
+
+  // Si no se solicita un tenant diferente, pasa
+  if (!requestedTenant || requestedTenant === tokenTenant) return next();
+
+  // superadmin puede acceder a cualquier tenant
+  if (req.role === 'superadmin') {
+    req.tenantId = requestedTenant;
+    return next();
+  }
+
+  return res.status(403).json({ error: 'No tienes acceso a este tenant' });
+}
+
 export function requireRole(roles = []) {
   const allowed = Array.isArray(roles) ? roles : [roles];
   return (req, res, next) => {

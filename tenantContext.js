@@ -38,6 +38,31 @@ export function messagesCol(tenantId, leadId) {
   return leadsCol(tenantId).doc(leadId).collection('messages');
 }
 
+export function configCol(tenantId) {
+  return tenantDoc(tenantId).collection('config');
+}
+
+// Lee la configuración del tenant con fallback a config global
+async function getTenantConfig(tenantId) {
+  const tId = requireTenantId(tenantId);
+  // 1) Intentar config del tenant
+  const tenantCfg = await configCol(tId).doc('appConfig').get();
+  if (tenantCfg.exists) return tenantCfg.data() || {};
+  // 2) Fallback a config global (legacy)
+  const globalCfg = await db.collection('config').doc('appConfig').get();
+  return globalCfg.exists ? globalCfg.data() || {} : {};
+}
+
+// Lee los hashtag mappings del tenant con fallback a estáticos
+async function getTenantHashtags(tenantId) {
+  const tId = requireTenantId(tenantId);
+  const doc = await configCol(tId).doc('hashtags').get();
+  if (doc.exists) return doc.data() || {};
+  return null; // null = usar estáticos
+}
+
+export { getTenantConfig, getTenantHashtags };
+
 export async function listActiveTenantIds() {
   const snap = await tenantsCol().where('disabled', '!=', true).get();
   if (snap.empty) return [];

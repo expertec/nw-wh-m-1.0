@@ -16,11 +16,14 @@ dotenv.config();
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // ================ Firebase / WhatsApp ================
-import { requireAuth } from './authMiddleware.js';
+import { requireAuth, requireTenantMatch, requireRole } from './authMiddleware.js';
 import {
   DEFAULT_TENANT_ID,
   leadsCol,
   secuenciasCol,
+  configCol,
+  tenantsCol,
+  tenantDoc,
   requireTenantId,
   listActiveTenantIds,
 } from './tenantContext.js';
@@ -49,15 +52,12 @@ app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 
-// Auth (Firebase ID token → tenant + rol)
-app.use('/api', requireAuth);
+// Auth (Firebase ID token → tenant + rol) + validación de tenant
+app.use('/api', requireAuth, requireTenantMatch);
 
 function getTenantId(req) {
   return requireTenantId(
     req.tenantId ||
-    req.headers['x-tenant-id'] ||
-    req.body?.tenantId ||
-    req.query?.tenantId ||
     DEFAULT_TENANT_ID
   );
 }
@@ -68,6 +68,177 @@ function getTenantId(req) {
 app.get('/', (_req, res) => {
   res.json({ message: 'WhatsApp CRM Server activo' });
 });
+
+// ============== TENANT MANAGEMENT (superadmin) ==============
+
+// Listar tenants
+app.get('/api/tenants', requireRole(['superadmin']), async (req, res) => {
+  try {
+    const snap = await tenantsCol().get();
+    const tenants = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    return res.json({ tenants });
+  } catch (err) {
+    console.error('Error listando tenants:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Obtener tenant por ID
+app.get('/api/tenants/:id', async (req, res) => {
+  try {
+    const tId = req.params.id;
+    // Solo superadmin puede ver otros tenants
+    if (tId !== req.tenantId && req.role !== 'superadmin') {
+      return res.status(403).json({ error: 'No tienes acceso a este tenant' });
+    }
+    const doc = await tenantDoc(tId).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Tenant no encontrado' });
+    return res.json({ id: doc.id, ...doc.data() });
+  } catch (err) {
+    console.error('Error obteniendo tenant:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Crear tenant (superadmin)
+app.post('/api/tenants', requireRole(['superadmin']), async (req, res) => {
+  try {
+    const { id, nombre, plan, ownerEmail } = req.body;
+    if (!id || !nombre) {
+      return res.status(400).json({ error: 'Faltan id y nombre' });
+    }
+
+    const existing = await tenantDoc(id).get();
+    if (existing.exists) {
+      return res.status(409).json({ error: 'Ya existe un tenant con ese ID' });
+    }
+
+    const tenantData = {
+      nombre,
+      plan: plan || 'basico',
+      ownerEmail: ownerEmail || null,
+      disabled: false,
+      createdAt: new Date(),
+    };
+
+    await tenantDoc(id).set(tenantData);
+
+    // Crear config por defecto del tenant
+    await configCol(id).doc('appConfig').set({
+      defaultTrigger: 'NuevoLeadWeb',
+      defaultTriggerMetaAds: 'WebPromo',
+    });
+
+    return res.status(201).json({ id, ...tenantData });
+  } catch (err) {
+    console.error('Error creando tenant:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Actualizar tenant
+app.patch('/api/tenants/:id', requireRole(['superadmin']), async (req, res) => {
+  try {
+    const tId = req.params.id;
+    const doc = await tenantDoc(tId).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Tenant no encontrado' });
+
+    const allowed = ['nombre', 'plan', 'ownerEmail', 'disabled'];
+    const updates = {};
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'Sin campos válidos para actualizar' });
+    }
+
+    updates.updatedAt = new Date();
+    await tenantDoc(tId).update(updates);
+    return res.json({ id: tId, ...updates });
+  } catch (err) {
+    console.error('Error actualizando tenant:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Obtener config del tenant
+app.get('/api/tenant-config', async (req, res) => {
+  try {
+    const tId = getTenantId(req);
+    const cfgDoc = await configCol(tId).doc('appConfig').get();
+    const cfg = cfgDoc.exists ? cfgDoc.data() : {};
+    return res.json({ tenantId: tId, config: cfg });
+  } catch (err) {
+    console.error('Error obteniendo config:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Actualizar config del tenant
+app.patch('/api/tenant-config', requireRole(['superadmin', 'admin']), async (req, res) => {
+  try {
+    const tId = getTenantId(req);
+    const { config } = req.body;
+    if (!config || typeof config !== 'object') {
+      return res.status(400).json({ error: 'Falta objeto config' });
+    }
+    await configCol(tId).doc('appConfig').set(config, { merge: true });
+    return res.json({ success: true, tenantId: tId });
+  } catch (err) {
+    console.error('Error actualizando config:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Obtener hashtags del tenant
+app.get('/api/tenant-config/hashtags', async (req, res) => {
+  try {
+    const tId = getTenantId(req);
+    const doc = await configCol(tId).doc('hashtags').get();
+    const data = doc.exists ? doc.data() : { hashtagMap: {}, cancelByTrigger: {} };
+    return res.json({ tenantId: tId, hashtags: data });
+  } catch (err) {
+    console.error('Error obteniendo hashtags:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Actualizar hashtags del tenant
+app.put('/api/tenant-config/hashtags', requireRole(['superadmin', 'admin']), async (req, res) => {
+  try {
+    const tId = getTenantId(req);
+    const { hashtagMap, cancelByTrigger } = req.body;
+    if (!hashtagMap || typeof hashtagMap !== 'object') {
+      return res.status(400).json({ error: 'Falta hashtagMap (objeto)' });
+    }
+    const data = {
+      hashtagMap,
+      cancelByTrigger: cancelByTrigger || {},
+      updatedAt: new Date(),
+    };
+    await configCol(tId).doc('hashtags').set(data);
+    return res.json({ success: true, tenantId: tId });
+  } catch (err) {
+    console.error('Error actualizando hashtags:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Conectar WhatsApp para un tenant (admin/superadmin)
+app.post('/api/whatsapp/connect', requireRole(['superadmin', 'admin']), async (req, res) => {
+  try {
+    const tId = getTenantId(req);
+    connectToWhatsApp(tId).catch(err =>
+      console.error(`Error conectando WA tenant=${tId}:`, err)
+    );
+    return res.json({ success: true, message: `Conectando WhatsApp para tenant ${tId}` });
+  } catch (err) {
+    console.error('Error iniciando conexión WA:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ============== WHATSAPP ROUTES ==============
 
 // WhatsApp status / número
 app.get('/api/whatsapp/status', (req, res) => {

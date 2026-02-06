@@ -25,6 +25,8 @@ import {
   messagesCol,
   hashtagTriggersCol,
   requireTenantId,
+  getTenantConfig,
+  getTenantHashtags,
 } from './tenantContext.js';
 
 // Cola de secuencias
@@ -123,13 +125,27 @@ async function resolveTriggerFromMessage(text, defaultTrigger = 'NuevoLeadWeb', 
   const tags = extractHashtags(text);
   if (tags.length === 0) return { trigger: defaultTrigger, cancel: [], source: 'default' };
 
-  // 1) Firestore (dinámico)
+  // 1) Firestore dinámico (hashtagTriggers collection)
   for (const tag of tags) {
     const dbRule = await resolveHashtagInDB(tag, tenantId);
     if (dbRule?.trigger) return { ...dbRule, source: 'db' };
   }
 
-  // 2) Estático
+  // 2) Config de hashtags por tenant (tenants/{id}/config/hashtags)
+  const tenantHashtags = await getTenantHashtags(tenantId);
+  if (tenantHashtags) {
+    const hashtagMap = tenantHashtags.hashtagMap || {};
+    const cancelByTrigger = tenantHashtags.cancelByTrigger || {};
+    for (const tag of tags) {
+      const trg = hashtagMap[tag];
+      if (trg) {
+        const cancel = cancelByTrigger[trg] || [];
+        return { trigger: trg, cancel, source: 'tenant_config' };
+      }
+    }
+  }
+
+  // 3) Estático (fallback global)
   for (const tag of tags) {
     const trg = STATIC_HASHTAG_MAP[tag];
     if (trg) {
@@ -138,7 +154,7 @@ async function resolveTriggerFromMessage(text, defaultTrigger = 'NuevoLeadWeb', 
     }
   }
 
-  // 3) Default
+  // 4) Default
   return { trigger: defaultTrigger, cancel: [], source: 'default' };
 }
 
@@ -392,9 +408,8 @@ export async function connectToWhatsApp(tenantId = DEFAULT_TENANT_ID) {
               const leadSnap = await leadRef.get();
 
               // 🔍 NUEVO: Intentar detectar trigger desde el ID del mensaje o metadata
-              const cfgSnap = await db.collection('config').doc('appConfig').get();
-              const cfg = cfgSnap.exists ? cfgSnap.data() : {};
-              const defaultTrigger = cfg.defaultTriggerMetaAds || 'WebPromo'; // ✅ Usar WebPromo por defecto para Meta Ads
+              const cfg = await getTenantConfig(tId);
+              const defaultTrigger = cfg.defaultTriggerMetaAds || 'WebPromo';
 
               // 🔍 Buscar hashtags en el pushName o en metadata del mensaje
               let detectedTrigger = defaultTrigger;
@@ -495,21 +510,21 @@ export async function connectToWhatsApp(tenantId = DEFAULT_TENANT_ID) {
           if (inner.videoMessage) {
             mediaType = 'video';
             const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
-            const fileRef = bucket.file(`videos/${normNum}-${Date.now()}.mp4`);
+            const fileRef = bucket.file(`${tId}/videos/${normNum}-${Date.now()}.mp4`);
             await fileRef.save(buffer, { contentType: 'video/mp4' });
             const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
             mediaUrl = url;
           } else if (inner.imageMessage) {
             mediaType = 'image';
             const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
-            const fileRef = bucket.file(`images/${normNum}-${Date.now()}.jpg`);
+            const fileRef = bucket.file(`${tId}/images/${normNum}-${Date.now()}.jpg`);
             await fileRef.save(buffer, { contentType: 'image/jpeg' });
             const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
             mediaUrl = url;
           } else if (inner.audioMessage) {
             mediaType = 'audio';
             const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
-            const fileRef = bucket.file(`audios/${normNum}-${Date.now()}.ogg`);
+            const fileRef = bucket.file(`${tId}/audios/${normNum}-${Date.now()}.ogg`);
             await fileRef.save(buffer, { contentType: 'audio/ogg' });
             const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
             mediaUrl = url;
@@ -518,7 +533,7 @@ export async function connectToWhatsApp(tenantId = DEFAULT_TENANT_ID) {
             const { mimetype, fileName: origName } = inner.documentMessage;
             const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
             const ext = path.extname(origName || '') || '';
-            const fileRef = bucket.file(`docs/${normNum}-${Date.now()}${ext}`);
+            const fileRef = bucket.file(`${tId}/docs/${normNum}-${Date.now()}${ext}`);
             await fileRef.save(buffer, { contentType: mimetype || 'application/octet-stream' });
             const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
             mediaUrl = url;
@@ -563,7 +578,7 @@ export async function connectToWhatsApp(tenantId = DEFAULT_TENANT_ID) {
             // #ok = detener secuencias
             if (/\B#ok\b/.test(textLower)) {
               try {
-                await cancelAllSequences(leadId);
+                await cancelAllSequences(leadId, tId);
                 await leadRef.set({
                   stopSequences: true,
                   hasActiveSequences: false,
@@ -579,8 +594,7 @@ export async function connectToWhatsApp(tenantId = DEFAULT_TENANT_ID) {
             // #info = forzar secuencia
             if (/\B#info\b/.test(textLower)) {
               try {
-                const cfgSnap = await db.collection('config').doc('appConfig').get();
-                const cfg = cfgSnap.exists ? cfgSnap.data() : {};
+                const cfg = await getTenantConfig(tId);
                 const defaultTrigger = cfg.defaultTrigger || 'NuevoLeadWeb';
 
                 const rule = await resolveTriggerFromMessage(content, defaultTrigger);
@@ -640,8 +654,7 @@ export async function connectToWhatsApp(tenantId = DEFAULT_TENANT_ID) {
           }
 
           // Mensajes de leads
-          const cfgSnap = await db.collection('config').doc('appConfig').get();
-          const cfg = cfgSnap.exists ? cfgSnap.data() : {};
+          const cfg = await getTenantConfig(tId);
           const defaultTrigger = cfg.defaultTrigger || 'NuevoLeadWeb';
           const rule = await resolveTriggerFromMessage(content, defaultTrigger, tId);
           let trigger = rule.trigger;
