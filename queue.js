@@ -1,6 +1,14 @@
 // queue.js
 import { db, admin } from './firebaseAdmin.js';
 import {
+  leadsCol,
+  secuenciasCol,
+  sequenceQueueCol,
+  messagesCol,
+  requireTenantId,
+  DEFAULT_TENANT_ID,
+} from './tenantContext.js';
+import {
   sendClipMessage,
   getWhatsAppSock,
   sendVideoNote,
@@ -156,16 +164,17 @@ function resolveType(raw) {
 }
 
 /* ---------------- persistencia uniforme de salientes ------------------- */
-async function persistOutgoing(leadId, { content = '', mediaType = 'text', mediaUrl = null }) {
+async function persistOutgoing(tenantId = DEFAULT_TENANT_ID, leadId, { content = '', mediaType = 'text', mediaUrl = null }) {
+  const tId = requireTenantId(tenantId);
   const now = new Date();
-  await db.collection('leads').doc(leadId).collection('messages').add({
+  await messagesCol(tId, leadId).add({
     content,
     mediaType,
     mediaUrl,
     sender: 'business',
     timestamp: now
   });
-  await db.collection('leads').doc(leadId).set(
+  await leadsCol(tId).doc(leadId).set(
     { lastMessageAt: now },
     { merge: true }
   );
@@ -189,32 +198,35 @@ async function sendWithRetry(sock, jid, message, opts = {}, attempts = 3) {
 }
 
 /* ----------------------- definición de secuencias ----------------------- */
-const _sequenceDefCache = new Map();
-const _sequenceDefCacheTime = new Map();
+const _sequenceDefCache = new Map();       // key: tenantId:trigger
+const _sequenceDefCacheTime = new Map();   // key: tenantId:trigger -> ts
 const SEQUENCE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
 const TRIGGER_FALLBACK = {
   WebPromo: 'NuevoLead',
   webpromo: 'NuevoLead'
 };
+const seqCacheKey = (tenantId, trigger) => `${tenantId}:${trigger}`;
 
-const isSeqCacheFresh = (key) => {
-  const ts = _sequenceDefCacheTime.get(key);
+const isSeqCacheFresh = (ckey) => {
+  const ts = _sequenceDefCacheTime.get(ckey);
   return typeof ts === 'number' && (Date.now() - ts) < SEQUENCE_CACHE_TTL_MS;
 };
-const setSeqCache = (key, value) => {
-  _sequenceDefCache.set(key, value);
-  _sequenceDefCacheTime.set(key, Date.now());
+const setSeqCache = (ckey, value) => {
+  _sequenceDefCache.set(ckey, value);
+  _sequenceDefCacheTime.set(ckey, Date.now());
   return value;
 };
 
-async function getSequenceDefinition(trigger) {
+async function getSequenceDefinition(trigger, tenantId = DEFAULT_TENANT_ID) {
   if (!trigger) return null;
+  const tId = requireTenantId(tenantId);
   const key = String(trigger);
-  if (_sequenceDefCache.has(key) && isSeqCacheFresh(key)) return _sequenceDefCache.get(key);
+  const cacheKey = seqCacheKey(tId, key);
+  if (_sequenceDefCache.has(cacheKey) && isSeqCacheFresh(cacheKey)) return _sequenceDefCache.get(cacheKey);
 
-  let seqDoc = await db.collection('secuencias').doc(key).get();
+  let seqDoc = await secuenciasCol(tId).doc(key).get();
   if (!seqDoc.exists) {
-    const q = await db.collection('secuencias')
+    const q = await secuenciasCol(tId)
       .where('trigger', '==', key)
       .limit(1)
       .get();
@@ -223,24 +235,24 @@ async function getSequenceDefinition(trigger) {
   if (!seqDoc.exists) {
     const fallback = TRIGGER_FALLBACK[key];
     if (fallback) {
-      console.warn(`[getSequenceDefinition] No existe secuencias/${key}. Usando fallback → ${fallback}`);
-      const fb = await getSequenceDefinition(fallback);
+      console.warn(`[getSequenceDefinition] No existe tenants/${tId}/secuencias/${key}. Usando fallback → ${fallback}`);
+      const fb = await getSequenceDefinition(fallback, tId);
       if (fb) {
         const aliasDef = { ...fb, trigger: key, aliasOf: fallback };
-        return setSeqCache(key, aliasDef);
+        return setSeqCache(cacheKey, aliasDef);
       }
     }
-    console.warn(`[getSequenceDefinition] No existe secuencias/${key}`);
-    return setSeqCache(key, null);
+    console.warn(`[getSequenceDefinition] No existe tenants/${tId}/secuencias/${key}`);
+    return setSeqCache(cacheKey, null);
   }
   const data = seqDoc.data() || {};
   const messages = Array.isArray(data.messages) ? data.messages : [];
   const def = { id: seqDoc.id, trigger: data.trigger || key, active: data.active !== false, messages };
-  return setSeqCache(key, def);
+  return setSeqCache(cacheKey, def);
 }
 
-function computeSequenceStepRun(trigger, startTime, index = 0) {
-  const seq = _sequenceDefCache.get(trigger);
+function computeSequenceStepRun(trigger, startTime, index = 0, tenantId = DEFAULT_TENANT_ID) {
+  const seq = _sequenceDefCache.get(seqCacheKey(requireTenantId(tenantId), trigger));
   if (!seq || !seq.messages || seq.messages.length === 0) return null;
   if (index == null || index >= seq.messages.length) return null;
 
@@ -252,11 +264,11 @@ function computeSequenceStepRun(trigger, startTime, index = 0) {
   return new Date(start.getTime() + delayMin * 60_000);
 }
 
-function computeNextRunForLead(secuencias = []) {
+function computeNextRunForLead(secuencias = [], tenantId = DEFAULT_TENANT_ID) {
   let nextAt = null;
   for (const seq of secuencias) {
     if (!seq || seq.completed) continue;
-    const runAt = computeSequenceStepRun(seq.trigger, seq.startTime, Number(seq.index || 0));
+    const runAt = computeSequenceStepRun(seq.trigger, seq.startTime, Number(seq.index || 0), tenantId);
     if (!runAt) continue;
     if (!nextAt || runAt < nextAt) nextAt = runAt;
   }
@@ -264,18 +276,19 @@ function computeNextRunForLead(secuencias = []) {
 }
 
 // helper: obtener lead
-async function _getLead(leadId) {
-  const snap = await db.collection('leads').doc(leadId).get();
+async function _getLead(leadId, tenantId = DEFAULT_TENANT_ID) {
+  const snap = await leadsCol(requireTenantId(tenantId)).doc(leadId).get();
   return snap.exists ? { id: snap.id, ...(snap.data() || {}) } : null;
 }
 
 /* -------------------- programar / cancelar secuencias ------------------- */
-export async function scheduleSequenceForLead(leadId, trigger, startAt = new Date()) {
-  const leadRef = db.collection('leads').doc(leadId);
+export async function scheduleSequenceForLead(leadId, trigger, startAt = new Date(), tenantId = DEFAULT_TENANT_ID) {
+  const tId = requireTenantId(tenantId);
+  const leadRef = leadsCol(tId).doc(leadId);
   const leadSnap = await leadRef.get();
   const leadData = leadSnap.exists ? leadSnap.data() || {} : {};
 
-  const def = await getSequenceDefinition(trigger);
+  const def = await getSequenceDefinition(trigger, tId);
   if (!def || def.active === false || !def.messages || def.messages.length === 0) return 0;
 
   // Reinicio si ya existe y no se fuerza: no duplicar
@@ -298,7 +311,7 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
   const sent = { ...(leadData.sequenceSentSteps || {}) };
   Object.keys(sent).forEach(k => { if (k.startsWith(`${trigger}:`)) delete sent[k]; });
 
-  const nextAt = computeNextRunForLead(secAct);
+  const nextAt = computeNextRunForLead(secAct, tId);
 
   const payload = {
     secuenciasActivas: secAct,
@@ -314,10 +327,10 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
   return def.messages.length;
 }
 
-export async function cancelSequences(leadId, triggers = []) {
+export async function cancelSequences(leadId, triggers = [], tenantId = DEFAULT_TENANT_ID) {
   if (!leadId || !Array.isArray(triggers) || triggers.length === 0) return 0;
 
-  const leadRef = db.collection('leads').doc(leadId);
+  const leadRef = leadsCol(requireTenantId(tenantId)).doc(leadId);
   const snap = await leadRef.get();
   if (!snap.exists) return 0;
 
@@ -333,7 +346,7 @@ export async function cancelSequences(leadId, triggers = []) {
     if (triggers.some(t => k.startsWith(`${t}:`))) delete sent[k];
   });
 
-  const nextAt = computeNextRunForLead(filtered);
+  const nextAt = computeNextRunForLead(filtered, tenantId);
   const patch = {
     secuenciasActivas: filtered,
     sequenceSentSteps: sent,
@@ -349,10 +362,10 @@ export async function cancelSequences(leadId, triggers = []) {
 }
 
 // 🔹 Cancelar TODO lo pendiente de un lead
-export async function cancelAllSequences(leadId) {
+export async function cancelAllSequences(leadId, tenantId = DEFAULT_TENANT_ID) {
   if (!leadId) return 0;
 
-  const leadRef = db.collection('leads').doc(leadId);
+  const leadRef = leadsCol(requireTenantId(tenantId)).doc(leadId);
   await leadRef.set({
     hasActiveSequences: false,
     secuenciasActivas: [],
@@ -364,21 +377,22 @@ export async function cancelAllSequences(leadId) {
 }
 
 // 🔹 Pausar / reanudar por lead (manual o por UI)
-export async function pauseSequences(leadId) {
+export async function pauseSequences(leadId, tenantId = DEFAULT_TENANT_ID) {
   if (!leadId) return false;
-  await db.collection('leads').doc(leadId).set({ seqPaused: true }, { merge: true });
+  await leadsCol(requireTenantId(tenantId)).doc(leadId).set({ seqPaused: true }, { merge: true });
   return true;
 }
-export async function resumeSequences(leadId) {
+export async function resumeSequences(leadId, tenantId = DEFAULT_TENANT_ID) {
   if (!leadId) return false;
-  await db.collection('leads').doc(leadId).set({ seqPaused: false }, { merge: true });
+  await leadsCol(requireTenantId(tenantId)).doc(leadId).set({ seqPaused: false }, { merge: true });
   return true;
 }
 
 /* -------------------------- entrega de mensajes ------------------------- */
 
-async function deliverPayload(leadId, payload) {
-  const leadSnap = await db.collection('leads').doc(leadId).get();
+async function deliverPayload(tenantId = DEFAULT_TENANT_ID, leadId, payload) {
+  const tId = requireTenantId(tenantId);
+  const leadSnap = await leadsCol(tId).doc(leadId).get();
   if (!leadSnap.exists) throw new Error(`Lead no existe: ${leadId}`);
 
   const lead = { id: leadSnap.id, ...leadSnap.data() };
@@ -390,7 +404,7 @@ async function deliverPayload(leadId, payload) {
   const contenido = payload?.contenido || '';
   const seconds = Number.isFinite(+payload?.seconds) ? +payload.seconds : null;
 
-  const sock = getWhatsAppSock();
+  const sock = getWhatsAppSock(tId);
   if (!sock) throw new Error('Socket de WhatsApp no está conectado');
 
   console.log(`[SEQ] dispatch → ${jid} type=${type} delay? (payload no incluye delay)`);
@@ -399,7 +413,7 @@ async function deliverPayload(leadId, payload) {
       const text = replacePlaceholders(contenido, lead).trim();
       if (text) {
         await sendWithRetry(sock, jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
-        await persistOutgoing(leadId, { content: text, mediaType: 'text' });
+        await persistOutgoing(tId, leadId, { content: text, mediaType: 'text' });
       }
       break;
     }
@@ -408,7 +422,7 @@ async function deliverPayload(leadId, payload) {
       const text = replacePlaceholders(contenido, lead).trim();
       if (text) {
         await sendWithRetry(sock, jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
-        await persistOutgoing(leadId, { content: text, mediaType: 'text' });
+        await persistOutgoing(tId, leadId, { content: text, mediaType: 'text' });
       }
       break;
     }
@@ -426,7 +440,7 @@ async function deliverPayload(leadId, payload) {
         let lastErr = null;
         for (let i = 0; i < 3 && !sent; i++) {
           try {
-            await sendAudioMessage(jid, audioSource, { ptt, forwarded });
+            await sendAudioMessage(tId, jid, audioSource, { ptt, forwarded });
             sent = true;
           } catch (err) {
             lastErr = err;
@@ -436,7 +450,7 @@ async function deliverPayload(leadId, payload) {
             await sleep((i + 1) * 3000);
           }
         }
-        await persistOutgoing(leadId, { content: '', mediaType: 'audio', mediaUrl: src });
+        await persistOutgoing(tId, leadId, { content: '', mediaType: 'audio', mediaUrl: src });
       }
       break;
     }
@@ -447,7 +461,7 @@ async function deliverPayload(leadId, payload) {
       const url = replacePlaceholders(contenido, lead).trim();
       if (url) {
         await sendWithRetry(sock, jid, { image: { url } }, { timeoutMs: 120_000 });
-        await persistOutgoing(leadId, { content: '', mediaType: 'image', mediaUrl: url });
+        await persistOutgoing(tId, leadId, { content: '', mediaType: 'image', mediaUrl: url });
       }
       break;
     }
@@ -456,7 +470,7 @@ async function deliverPayload(leadId, payload) {
       const url = replacePlaceholders(contenido, lead).trim();
       if (url) {
         await sendWithRetry(sock, jid, { video: { url } }, { timeoutMs: 120_000 });
-        await persistOutgoing(leadId, { content: '', mediaType: 'video', mediaUrl: url });
+        await persistOutgoing(tId, leadId, { content: '', mediaType: 'video', mediaUrl: url });
       }
       break;
     }
@@ -469,7 +483,7 @@ async function deliverPayload(leadId, payload) {
         let lastErr = null;
         for (let i = 0; i < 3 && !sent; i++) {
           try {
-            await sendVideoNote(phone || jid, url, seconds);
+            await sendVideoNote(tId, phone || jid, url, seconds);
             sent = true;
           } catch (err) {
             lastErr = err;
@@ -479,7 +493,7 @@ async function deliverPayload(leadId, payload) {
             await sleep((i + 1) * 3000);
           }
         }
-        await persistOutgoing(leadId, { content: '', mediaType: 'video_note', mediaUrl: url });
+        await persistOutgoing(tId, leadId, { content: '', mediaType: 'video_note', mediaUrl: url });
       }
       break;
     }
@@ -489,7 +503,7 @@ async function deliverPayload(leadId, payload) {
       const text = replacePlaceholders(contenido, lead).trim();
       if (text) {
         await sendWithRetry(sock, jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
-        await persistOutgoing(leadId, { content: text, mediaType: 'text' });
+        await persistOutgoing(tId, leadId, { content: text, mediaType: 'text' });
       } else {
         console.warn(`[SEQ] tipo no soportado: ${rawType} (normalizado=${type})`);
       }
@@ -505,10 +519,11 @@ async function deliverPayload(leadId, payload) {
  *  - Pausa por lead (seqPaused)
  *  - Paro duro por etiqueta (Compro / DetenerSecuencia / StopSequences)
  */
-export async function processQueue({ batchSize = 100, shard = null } = {}) {
+export async function processQueue({ batchSize = 100, shard = null, tenantId = DEFAULT_TENANT_ID } = {}) {
   const now = new Date();
+  const tId = requireTenantId(tenantId);
 
-  let q = db.collection('sequenceQueue')
+  let q = sequenceQueueCol(tId)
     .where('status', '==', 'pending')
     .where('dueAt', '<=', now)
     .orderBy('dueAt', 'asc')
@@ -541,7 +556,7 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
       // obtener estado del lead (cacheado)
       let lead = leadCache.get(job.leadId);
       if (!lead) {
-        lead = await _getLead(job.leadId);
+        lead = await _getLead(job.leadId, tId);
         leadCache.set(job.leadId, lead);
       }
       if (!lead) {
@@ -588,7 +603,7 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
         });
         // cancelar todo lo demás una sola vez por lead
         if (!lead._allCanceledOnce) {
-          await cancelAllSequences(job.leadId).catch(() => {});
+          await cancelAllSequences(job.leadId, tId).catch(() => {});
           lead._allCanceledOnce = true;
           leadCache.set(job.leadId, lead);
         }
@@ -596,14 +611,14 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
       }
 
       // entrega normal
-      await deliverPayload(job.leadId, job.payload);
+      await deliverPayload(tId, job.leadId, job.payload);
 
       await job.ref.update({
         status: 'sent',
         processedAt: FieldValue.serverTimestamp()
       });
 
-      await db.collection('leads').doc(job.leadId).set({
+      await leadsCol(tId).doc(job.leadId).set({
         lastMessageAt: FieldValue.serverTimestamp()
       }, { merge: true });
 
@@ -672,9 +687,9 @@ async function releaseSequenceLock(leadRef) {
   await leadRef.set({ sequenceLock: FieldValue.delete() }, { merge: true }).catch(() => {});
 }
 
-async function persistSystemMessage(leadId, content) {
+async function persistSystemMessage(tenantId = DEFAULT_TENANT_ID, leadId, content) {
   try {
-    await db.collection('leads').doc(leadId).collection('messages').add({
+    await messagesCol(requireTenantId(tenantId), leadId).add({
       sender: 'system',
       content,
       timestamp: new Date()
@@ -684,8 +699,9 @@ async function persistSystemMessage(leadId, content) {
   }
 }
 
-export async function processLeadSequences(leadId) {
-  const leadRef = db.collection('leads').doc(leadId);
+export async function processLeadSequences(leadId, tenantId = DEFAULT_TENANT_ID) {
+  const tId = requireTenantId(tenantId);
+  const leadRef = leadsCol(tId).doc(leadId);
   const lock = await takeSequenceLock(leadRef);
   if (!lock.ok) return { processed: 0, reason: 'locked' };
 
@@ -712,13 +728,13 @@ export async function processLeadSequences(leadId) {
 
     for (const seq of secuencias) {
       if (seq.completed) continue;
-      const def = await getSequenceDefinition(seq.trigger);
+      const def = await getSequenceDefinition(seq.trigger, tId);
       if (!def || def.active === false || !def.messages || def.messages.length === 0) {
         seq.completed = true;
         continue;
       }
 
-      const runAt = computeSequenceStepRun(seq.trigger, seq.startTime, seq.index);
+      const runAt = computeSequenceStepRun(seq.trigger, seq.startTime, seq.index, tId);
       if (!runAt) {
         seq.completed = true;
         continue;
@@ -733,10 +749,10 @@ export async function processLeadSequences(leadId) {
       }
 
       const msg = def.messages[seq.index] || {};
-      await deliverPayload(leadId, msg);
+      await deliverPayload(tId, leadId, msg);
       processed += 1;
       sentSteps[stepKey] = Timestamp.now();
-      await persistSystemMessage(leadId, `[sequence:${seq.trigger}] step ${seq.index} enviado`);
+      await persistSystemMessage(tId, leadId, `[sequence:${seq.trigger}] step ${seq.index} enviado`);
 
       seq.index += 1;
       if (seq.index >= def.messages.length) seq.completed = true;
@@ -744,7 +760,7 @@ export async function processLeadSequences(leadId) {
 
     // limpiar completados
     secuencias = secuencias.filter(s => !s.completed);
-    const nextAt = computeNextRunForLead(secuencias);
+    const nextAt = computeNextRunForLead(secuencias, tId);
 
     const patch = {
       secuenciasActivas: secuencias,
@@ -763,9 +779,9 @@ export async function processLeadSequences(leadId) {
   }
 }
 
-export async function processSequenceLeadsBatch({ limit = MAX_SEQUENCE_BATCH } = {}) {
+export async function processSequenceLeadsBatch({ limit = MAX_SEQUENCE_BATCH, tenantId = DEFAULT_TENANT_ID } = {}) {
   const now = new Date();
-  const snap = await db.collection('leads')
+  const snap = await leadsCol(requireTenantId(tenantId))
     .where('nextSequenceRunAt', '<=', now)
     .orderBy('nextSequenceRunAt', 'asc')
     .limit(limit)
@@ -776,7 +792,7 @@ export async function processSequenceLeadsBatch({ limit = MAX_SEQUENCE_BATCH } =
   let total = 0;
   for (const doc of snap.docs) {
     try {
-      const res = await processLeadSequences(doc.id);
+      const res = await processLeadSequences(doc.id, tenantId);
       total += res?.processed || 0;
     } catch (err) {
       console.error('[processSequenceLeadsBatch] error:', err?.message || err);
@@ -785,8 +801,8 @@ export async function processSequenceLeadsBatch({ limit = MAX_SEQUENCE_BATCH } =
   return total;
 }
 
-export async function hydrateNextSequenceRun({ limit = 50 } = {}) {
-  const snap = await db.collection('leads')
+export async function hydrateNextSequenceRun({ limit = 50, tenantId = DEFAULT_TENANT_ID } = {}) {
+  const snap = await leadsCol(requireTenantId(tenantId))
     .where('secuenciasActivas', '!=', null)
     .limit(limit)
     .get();
@@ -798,8 +814,9 @@ export async function hydrateNextSequenceRun({ limit = 50 } = {}) {
     const secuencias = normalizeSecuencias(data.secuenciasActivas);
     if (!secuencias.length) continue;
     for (const seq of secuencias) {
-      if (!_sequenceDefCache.has(seq.trigger) || !isSeqCacheFresh(seq.trigger)) {
-        await getSequenceDefinition(seq.trigger);
+      const ckey = seqCacheKey(requireTenantId(tenantId), seq.trigger);
+      if (!_sequenceDefCache.has(ckey) || !isSeqCacheFresh(ckey)) {
+        await getSequenceDefinition(seq.trigger, tenantId);
       }
     }
     const nextAt = computeNextRunForLead(secuencias);
@@ -810,8 +827,8 @@ export async function hydrateNextSequenceRun({ limit = 50 } = {}) {
   return updated;
 }
 
-export async function backfillMissingSequences({ limit = 50, trigger = null } = {}) {
-  const snap = await db.collection('leads')
+export async function backfillMissingSequences({ limit = 50, trigger = null, tenantId = DEFAULT_TENANT_ID } = {}) {
+  const snap = await leadsCol(requireTenantId(tenantId))
     .where('secuenciasActivas', '==', null)
     .limit(limit)
     .get();
@@ -823,10 +840,10 @@ export async function backfillMissingSequences({ limit = 50, trigger = null } = 
     const trg = trigger || doc.data()?.trigger || 'NuevoLeadWeb';
     const seq = { trigger: trg, startTime: new Date().toISOString(), index: 0, completed: false };
     const nextAt = await (async () => {
-      const def = await getSequenceDefinition(trg);
+      const def = await getSequenceDefinition(trg, tenantId);
       if (!def) return null;
-      _sequenceDefCache.set(trg, def);
-      return computeSequenceStepRun(trg, seq.startTime, seq.index);
+      _sequenceDefCache.set(seqCacheKey(requireTenantId(tenantId), trg), def);
+      return computeSequenceStepRun(trg, seq.startTime, seq.index, tenantId);
     })();
 
     await doc.ref.set({

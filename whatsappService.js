@@ -19,6 +19,13 @@ import { db } from './firebaseAdmin.js';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+import {
+  DEFAULT_TENANT_ID,
+  leadsCol,
+  messagesCol,
+  hashtagTriggersCol,
+  requireTenantId,
+} from './tenantContext.js';
 
 // Cola de secuencias
 import {
@@ -31,14 +38,23 @@ import {
 } from './queue.js';
 
 
-let latestQR = null;
-let connectionStatus = 'Desconectado';
-let whatsappSock = null;
-let sessionPhone = null;
-
-const localAuthFolder = '/var/data';
+const sessions = new Map(); // tenantId -> { sock, latestQR, connectionStatus, sessionPhone }
+const localAuthBase = '/var/data';
 const { FieldValue } = admin.firestore;
 const bucket = admin.storage().bucket();
+
+function ensureSession(tenantId = DEFAULT_TENANT_ID) {
+  const tId = requireTenantId(tenantId);
+  if (!sessions.has(tId)) {
+    sessions.set(tId, {
+      latestQR: null,
+      connectionStatus: 'Desconectado',
+      sessionPhone: null,
+      sock: null,
+    });
+  }
+  return sessions.get(tId);
+}
 
 /* ------------------------------ helpers ------------------------------ */
 // alias → trigger (en minúsculas)
@@ -93,9 +109,8 @@ function normalizePhoneForWA(phone) {
 }
 
 // Reglas dinámicas opcionales en Firestore
-async function resolveHashtagInDB(code) {
-  const snap = await db
-    .collection('hashtagTriggers')
+async function resolveHashtagInDB(code, tenantId = DEFAULT_TENANT_ID) {
+  const snap = await hashtagTriggersCol(requireTenantId(tenantId))
     .where('code', '==', code.replace(/^#/, '').toLowerCase())
     .limit(1)
     .get();
@@ -104,13 +119,13 @@ async function resolveHashtagInDB(code) {
   return { trigger: row.trigger, cancel: row.cancel || [] };
 }
 
-async function resolveTriggerFromMessage(text, defaultTrigger = 'NuevoLeadWeb') {
+async function resolveTriggerFromMessage(text, defaultTrigger = 'NuevoLeadWeb', tenantId = DEFAULT_TENANT_ID) {
   const tags = extractHashtags(text);
   if (tags.length === 0) return { trigger: defaultTrigger, cancel: [], source: 'default' };
 
   // 1) Firestore (dinámico)
   for (const tag of tags) {
-    const dbRule = await resolveHashtagInDB(tag);
+    const dbRule = await resolveHashtagInDB(tag, tenantId);
     if (dbRule?.trigger) return { ...dbRule, source: 'db' };
   }
 
@@ -204,14 +219,18 @@ function resolveSenderFromLid(msg) {
 }
 
 /* ---------------------------- conexión WA ---------------------------- */
-export async function connectToWhatsApp() {
+export async function connectToWhatsApp(tenantId = DEFAULT_TENANT_ID) {
+  const tId = requireTenantId(tenantId);
+  const session = ensureSession(tId);
+  const localAuthFolder = path.join(localAuthBase, tId);
+
   try {
     if (!fs.existsSync(localAuthFolder)) {
       fs.mkdirSync(localAuthFolder, { recursive: true });
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(localAuthFolder);
-    if (state.creds.me?.id) sessionPhone = state.creds.me.id.split('@')[0];
+    if (state.creds.me?.id) session.sessionPhone = state.creds.me.id.split('@')[0];
 
     const { version } = await fetchLatestBaileysVersion();
     const sock = makeWASocket({
@@ -220,32 +239,34 @@ export async function connectToWhatsApp() {
       printQRInTerminal: true,
       version,
     });
-    whatsappSock = sock;
+    session.sock = sock;
 
     // ── eventos de conexión
     sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
       if (qr) {
-        latestQR = qr;
-        connectionStatus = 'QR disponible. Escanéalo.';
+        session.latestQR = qr;
+        session.connectionStatus = 'QR disponible. Escanéalo.';
         QRCode.generate(qr, { small: true });
       }
       if (connection === 'open') {
-        connectionStatus = 'Conectado';
-        latestQR = null;
-        if (sock.user?.id) sessionPhone = sock.user.id.split('@')[0];
+        session.connectionStatus = 'Conectado';
+        session.latestQR = null;
+        if (sock.user?.id) session.sessionPhone = sock.user.id.split('@')[0];
       }
       if (connection === 'close') {
         const reason = lastDisconnect?.error?.output?.statusCode;
-        connectionStatus = 'Desconectado';
+        session.connectionStatus = 'Desconectado';
         if (reason === DisconnectReason.loggedOut) {
-          for (const f of fs.readdirSync(localAuthFolder)) {
-            fs.rmSync(path.join(localAuthFolder, f), { force: true, recursive: true });
+          if (fs.existsSync(localAuthFolder)) {
+            for (const f of fs.readdirSync(localAuthFolder)) {
+              fs.rmSync(path.join(localAuthFolder, f), { force: true, recursive: true });
+            }
           }
-          sessionPhone = null;
+          session.sessionPhone = null;
         }
         // Backoff más largo para Render
         const delay = Math.floor(Math.random() * 8000) + 5000;
-        setTimeout(() => connectToWhatsApp().catch(() => {}), delay);
+        setTimeout(() => connectToWhatsApp(tId).catch(() => {}), delay);
       }
     });
 
@@ -367,7 +388,7 @@ export async function connectToWhatsApp() {
             if (finalJid) {
               console.log(`[WA] 🔄 Intentando crear/actualizar lead sin contenido de mensaje para ${finalJid}`);
 
-              const leadRef = db.collection('leads').doc(leadId);
+              const leadRef = leadsCol(tId).doc(leadId);
               const leadSnap = await leadRef.get();
 
               // 🔍 NUEVO: Intentar detectar trigger desde el ID del mensaje o metadata
@@ -423,7 +444,7 @@ export async function connectToWhatsApp() {
                 console.log(`[WA] ✅ Lead creado desde Meta Ads: ${leadId} - Programando secuencia: ${detectedTrigger}`);
 
                 try {
-                  await scheduleSequenceForLead(leadId, detectedTrigger, now());
+                  await scheduleSequenceForLead(leadId, detectedTrigger, now(), tId);
                   console.log(`[WA] 🎯 Secuencia ${detectedTrigger} programada para ${leadId}`);
                 } catch (seqErr) {
                   console.error(`[WA] ❌ Error programando secuencia: ${seqErr?.message || seqErr}`);
@@ -444,7 +465,7 @@ export async function connectToWhatsApp() {
 
                 if (!blocked && !alreadyHas) {
                   try {
-                    await scheduleSequenceForLead(leadId, detectedTrigger, now());
+                    await scheduleSequenceForLead(leadId, detectedTrigger, now(), tId);
                     console.log(`[WA] 🎯 Secuencia ${detectedTrigger} programada para lead existente ${leadId}`);
                   } catch (seqErr) {
                     console.error(`[WA] ❌ Error programando secuencia: ${seqErr?.message || seqErr}`);
@@ -514,7 +535,7 @@ export async function connectToWhatsApp() {
 
           // Mensajes propios (fromMe)
           if (sender === 'business') {
-            const leadRef = db.collection('leads').doc(leadId);
+            const leadRef = leadsCol(tId).doc(leadId);
 
             const msgData = {
               content,
@@ -570,7 +591,7 @@ export async function connectToWhatsApp() {
                 const leadData = leadSnap.exists ? leadSnap.data() : {};
 
                 if (toCancel.length) {
-                  await cancelSequences(leadId, ...toCancel);
+                  await cancelSequences(leadId, toCancel, tId);
                 }
 
                 if (!shouldBlockSequences(leadData, trigger)) {
@@ -579,7 +600,7 @@ export async function connectToWhatsApp() {
                     hasActiveSequences: true,
                   }, { merge: true });
 
-                  await scheduleSequenceForLead(leadId, trigger, now());
+                  await scheduleSequenceForLead(leadId, trigger, now(), tId);
                   console.log(`[WA] #info → secuencia ${trigger} programada para ${leadId}`);
                 } else {
                   console.log(`[WA] #info → bloqueado para ${leadId}`);
@@ -603,7 +624,7 @@ export async function connectToWhatsApp() {
                   hasActiveSequences: true
                 }, { merge: true });
 
-                const scheduled = await scheduleSequenceForLead(leadId, trigger, now());
+                const scheduled = await scheduleSequenceForLead(leadId, trigger, now(), tId);
                 if (scheduled > 0) {
                   console.log(`[WA] ✅ #WebPromo → Secuencia programada (${scheduled} pasos) para ${leadId}`);
                 } else {
@@ -622,7 +643,7 @@ export async function connectToWhatsApp() {
           const cfgSnap = await db.collection('config').doc('appConfig').get();
           const cfg = cfgSnap.exists ? cfgSnap.data() : {};
           const defaultTrigger = cfg.defaultTrigger || 'NuevoLeadWeb';
-          const rule = await resolveTriggerFromMessage(content, defaultTrigger);
+          const rule = await resolveTriggerFromMessage(content, defaultTrigger, tId);
           let trigger = rule.trigger;
           const toCancel = rule.cancel || [];
 
@@ -641,7 +662,7 @@ export async function connectToWhatsApp() {
 
           const etiquetaUnion = hasWebPromo ? [trigger, 'WebPromo'] : [trigger];
 
-          const leadRef = db.collection('leads').doc(leadId);
+          const leadRef = leadsCol(tId).doc(leadId);
           const leadSnap = await leadRef.get();
 
           const baseLead = {
@@ -665,11 +686,11 @@ export async function connectToWhatsApp() {
               lastMessageAt: now(),
             });
 
-            if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
+            if (toCancel.length) await cancelSequences(leadId, toCancel, tId).catch(() => {});
 
             const canSchedule = !shouldBlockSequences({}, trigger);
             if (canSchedule) {
-              await scheduleSequenceForLead(leadId, trigger, now());
+              await scheduleSequenceForLead(leadId, trigger, now(), tId);
               console.log('[WA] ✅ Lead CREADO + secuencia programada:', { leadId, phone: normNum, trigger, source: rule.source });
             } else {
               console.log('[WA] Lead CREADO (bloqueado); no se programa:', { leadId, trigger });
@@ -696,13 +717,13 @@ export async function connectToWhatsApp() {
               await leadRef.set({ estado: 'nuevo', hasActiveSequences: true }, { merge: true });
             }
 
-            if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
+            if (toCancel.length) await cancelSequences(leadId, toCancel, tId).catch(() => {});
 
             const blocked = shouldBlockSequences(current, trigger);
             const alreadyHas = hasSameTrigger(current.secuenciasActivas, trigger);
 
             if (!blocked && !alreadyHas && (rule.source === 'hashtag' || rule.source === 'db')) {
-              await scheduleSequenceForLead(leadId, trigger, now());
+              await scheduleSequenceForLead(leadId, trigger, now(), tId);
               console.log('[WA] ✅ Lead ACTUALIZADO (reprogramado):', { leadId, trigger, source: rule.source });
             } else {
               console.log('[WA] Lead ACTUALIZADO (sin reprogramar):', {
@@ -745,13 +766,22 @@ export async function connectToWhatsApp() {
 
 
 /* ----------------------------- helpers envío ---------------------------- */
-export function getLatestQR() { return latestQR; }
-export function getConnectionStatus() { return connectionStatus; }
-export function getWhatsAppSock() { return whatsappSock; }
-export function getSessionPhone() { return sessionPhone; }
+export function getLatestQR(tenantId = DEFAULT_TENANT_ID) {
+  return ensureSession(tenantId).latestQR;
+}
+export function getConnectionStatus(tenantId = DEFAULT_TENANT_ID) {
+  return ensureSession(tenantId).connectionStatus;
+}
+export function getWhatsAppSock(tenantId = DEFAULT_TENANT_ID) {
+  return ensureSession(tenantId).sock;
+}
+export function getSessionPhone(tenantId = DEFAULT_TENANT_ID) {
+  return ensureSession(tenantId).sessionPhone;
+}
 
-export async function sendMessageToLead(phoneOrJid, messageContent) {
-  if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
+export async function sendMessageToLead(tenantId = DEFAULT_TENANT_ID, phoneOrJid, messageContent) {
+  const sock = getWhatsAppSock(tenantId);
+  if (!sock) throw new Error('No hay conexión activa con WhatsApp');
 
   const raw = String(phoneOrJid || '');
   const isJidInput = raw.includes('@');
@@ -763,7 +793,7 @@ export async function sendMessageToLead(phoneOrJid, messageContent) {
   let leadData = null;
 
   if (normalizedInputJid) {
-    const snap = await db.collection('leads').doc(normalizedInputJid).get();
+    const snap = await leadsCol(requireTenantId(tenantId)).doc(normalizedInputJid).get();
     if (snap.exists) {
       leadId = snap.id;
       leadData = snap.data() || {};
@@ -771,7 +801,7 @@ export async function sendMessageToLead(phoneOrJid, messageContent) {
   }
 
   if (!leadData && num) {
-    const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
+    const q = await leadsCol(requireTenantId(tenantId)).where('telefono', '==', num).limit(1).get();
     if (!q.empty) {
       leadId = q.docs[0].id;
       leadData = q.docs[0].data() || {};
@@ -785,7 +815,7 @@ export async function sendMessageToLead(phoneOrJid, messageContent) {
 
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
 
-  await whatsappSock.sendMessage(
+  await sock.sendMessage(
     targetJid,
     { text: messageContent, linkPreview: false },
     { timeoutMs: 60_000 }
@@ -793,14 +823,14 @@ export async function sendMessageToLead(phoneOrJid, messageContent) {
 
   if (leadId) {
     const outMsg = { content: messageContent, sender: 'business', timestamp: now() };
-    await db.collection('leads').doc(leadId).collection('messages').add(outMsg);
-    await db.collection('leads').doc(leadId).update({ lastMessageAt: outMsg.timestamp });
+    await messagesCol(requireTenantId(tenantId), leadId).add(outMsg);
+    await leadsCol(requireTenantId(tenantId)).doc(leadId).update({ lastMessageAt: outMsg.timestamp });
   }
   return { success: true };
 }
 
-export async function sendFullAudioAsDocument(phone, fileUrl) {
-  const sock = getWhatsAppSock();
+export async function sendFullAudioAsDocument(tenantId = DEFAULT_TENANT_ID, phone, fileUrl) {
+  const sock = getWhatsAppSock(tenantId);
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');
 
   const num = normalizePhoneForWA(phone);
@@ -818,12 +848,12 @@ export async function sendFullAudioAsDocument(phone, fileUrl) {
   console.log(`✅ Canción completa enviada como adjunto a ${jid}`);
 }
 
-export async function sendAudioMessage(phoneOrJid, audioSrc, {
+export async function sendAudioMessage(tenantId = DEFAULT_TENANT_ID, phoneOrJid, audioSrc, {
   ptt = true,
   forwarded = false,
   quoted = null
 } = {}) {
-  const sock = getWhatsAppSock();
+  const sock = getWhatsAppSock(tenantId);
   if (!sock) throw new Error('Socket de WhatsApp no está conectado');
 
   const raw = String(phoneOrJid || '');
@@ -858,8 +888,8 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
   return sock.sendMessage(jid, message, options);
 }
 
-export async function sendClipMessage(phone, clipUrl) {
-  const sock = getWhatsAppSock();
+export async function sendClipMessage(tenantId = DEFAULT_TENANT_ID, phone, clipUrl) {
+  const sock = getWhatsAppSock(tenantId);
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');
 
   const num = normalizePhoneForWA(phone);
@@ -901,8 +931,8 @@ export async function sendClipMessage(phone, clipUrl) {
   }
 }
 
-export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
-  const sock = getWhatsAppSock();
+export async function sendVoiceNoteFromUrl(tenantId = DEFAULT_TENANT_ID, phone, fileUrl, secondsHint = null) {
+  const sock = getWhatsAppSock(tenantId);
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');
 
   const num = normalizePhoneForWA(phone);
@@ -919,7 +949,7 @@ export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
 
   await sock.sendMessage(jid, msg, { timeoutMs: 120_000 });
 
-  const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
+  const q = await leadsCol(requireTenantId(tenantId)).where('telefono', '==', num).limit(1).get();
   if (!q.empty) {
     const leadId = q.docs[0].id;
     const msgData = {
@@ -929,13 +959,13 @@ export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
       sender: 'business',
       timestamp: new Date()
     };
-    await db.collection('leads').doc(leadId).collection('messages').add(msgData);
-    await db.collection('leads').doc(leadId).update({ lastMessageAt: msgData.timestamp });
+    await messagesCol(requireTenantId(tenantId), leadId).add(msgData);
+    await leadsCol(requireTenantId(tenantId)).doc(leadId).update({ lastMessageAt: msgData.timestamp });
   }
 }
 
-export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
-  const sock = getWhatsAppSock();
+export async function sendVideoNote(tenantId = DEFAULT_TENANT_ID, phone, videoUrlOrPath, secondsHint = null) {
+  const sock = getWhatsAppSock(tenantId);
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');
 
   const num = normalizePhoneForWA(phone);
@@ -980,7 +1010,7 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
     console.log(`✅ videonota enviada desde archivo local a ${jid}`);
   }
 
-  const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
+  const q = await leadsCol(requireTenantId(tenantId)).where('telefono', '==', num).limit(1).get();
   if (!q.empty) {
     const leadId = q.docs[0].id;
     const msgData = {
@@ -990,7 +1020,7 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
       sender: 'business',
       timestamp: new Date()
     };
-    await db.collection('leads').doc(leadId).collection('messages').add(msgData);
-    await db.collection('leads').doc(leadId).update({ lastMessageAt: msgData.timestamp });
+    await messagesCol(requireTenantId(tenantId), leadId).add(msgData);
+    await leadsCol(requireTenantId(tenantId)).doc(leadId).update({ lastMessageAt: msgData.timestamp });
   }
 }
