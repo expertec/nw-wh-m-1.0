@@ -61,7 +61,24 @@ async function getTenantHashtags(tenantId) {
   return null; // null = usar estáticos
 }
 
-export { getTenantConfig, getTenantHashtags };
+// Lee la configuración del agente IA del tenant
+async function getAgentConfig(tenantId) {
+  const tId = requireTenantId(tenantId);
+  const doc = await configCol(tId).doc('aiAgent').get();
+  return doc.exists ? doc.data() : null;
+}
+
+// Colección de contexto conversacional de IA por lead
+export function aiContextCol(tenantId, leadId) {
+  return leadsCol(tenantId).doc(leadId).collection('aiContext');
+}
+
+// Colección de integraciones externas por tenant
+export function integrationsCol(tenantId) {
+  return configCol(tenantId).collection('integrations');
+}
+
+export { getTenantConfig, getTenantHashtags, getAgentConfig };
 
 export async function listActiveTenantIds() {
   const snap = await tenantsCol().where('disabled', '!=', true).get();

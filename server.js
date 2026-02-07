@@ -41,6 +41,9 @@ import {
 // ================ Secuencias ================
 import { processSequences } from './scheduler.js';
 
+// ================ AI Agent ================
+import aiAgentRoutes from './routes/aiAgentRoutes.js';
+
 // ================ App base ================
 const app = express();
 const port = process.env.PORT || 3001;
@@ -208,6 +211,9 @@ function getTenantId(req) {
 app.get('/', (_req, res) => {
   res.json({ message: 'WhatsApp CRM Server activo' });
 });
+
+// ============== AI AGENT ROUTES ==============
+app.use('/api/ai-agent', aiAgentRoutes);
 
 // ============== TENANT MANAGEMENT (superadmin) ==============
 

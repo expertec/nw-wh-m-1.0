@@ -666,6 +666,37 @@ export async function connectToWhatsApp(tenantId = DEFAULT_TENANT_ID) {
 
           // Mensajes de leads
           const cfg = await getTenantConfig(tId);
+
+          // NUEVO: Interceptor del agente IA
+          if (cfg.aiAgentEnabled) {
+            try {
+              const { aiAgentService } = await import('./ai/aiAgentService.js');
+              const { shouldHandleWithAI, response } = await aiAgentService.processMessage({
+                tenantId: tId,
+                leadId,
+                message: content,
+                leadData: {
+                  nombre: msg.pushName || '',
+                  telefono: normNum,
+                  jid,
+                  source: 'WhatsApp'
+                }
+              });
+
+              if (shouldHandleWithAI) {
+                console.log('[AI] Mensaje manejado por agente IA:', leadId);
+                // El agente ya envió la respuesta, no ejecutar flujo de secuencias
+                continue;
+              }
+
+              // Si el agente no manejó el mensaje, continuar con flujo normal
+              console.log('[AI] Agente no manejó mensaje, usando flujo estándar');
+            } catch (aiError) {
+              console.error('[AI] Error en agente IA, fallback a flujo estándar:', aiError.message);
+              // Continuar con flujo normal si el agente falla
+            }
+          }
+
           const defaultTrigger = cfg.defaultTrigger || 'NuevoLeadWeb';
           const rule = await resolveTriggerFromMessage(content, defaultTrigger, tId);
           let trigger = rule.trigger;
