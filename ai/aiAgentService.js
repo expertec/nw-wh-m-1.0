@@ -3,6 +3,12 @@ import { contextManager } from './contextManager.js';
 import { promptBuilder } from './promptBuilder.js';
 import { getAgentConfig, leadsCol } from '../tenantContext.js';
 import { AIRateLimiter } from '../utils/rateLimiter.js';
+import { toolRegistry } from '../tools/toolRegistry.js';
+import { ToolExecutor } from '../tools/base/ToolExecutor.js';
+import { sendMessageToLead } from '../whatsappService.js';
+
+// Importar tools para que se auto-registren
+import '../tools/echo/EchoTool.js';
 
 /**
  * Servicio principal del agente IA
@@ -38,32 +44,104 @@ export const aiAgentService = {
       // 4. Obtener datos completos del lead desde Firestore
       const fullLeadData = await this._getFullLeadData(tenantId, leadId, leadData);
 
-      // 5. Construir system prompt
+      // 5. Obtener tools habilitados para este tenant
+      const availableTools = await toolRegistry.getEnabledTools(tenantId);
+      console.log(`[AI] Tools disponibles: ${availableTools.map(t => t.name).join(', ') || 'ninguno'}`);
+
+      // 6. Construir system prompt
       const systemPrompt = promptBuilder.build({
         personality: agentConfig.personality || {},
         businessContext: agentConfig.businessContext || {},
-        availableTools: [], // Por ahora sin tools, se agregarán en Fase 3
+        availableTools,
         leadData: fullLeadData
       });
 
-      // 6. Llamar a OpenAI
+      // 7. Formatear tools para OpenAI
       const openaiProvider = new OpenAIProvider(process.env.OPENAI_API_KEY);
+      const formattedTools = openaiProvider.formatToolsForOpenAI(availableTools);
+
+      // 8. Llamar a OpenAI
       const response = await openaiProvider.sendMessage({
         systemPrompt,
         conversationHistory: context.history,
         userMessage: message,
         model: agentConfig.model || 'gpt-4o',
         maxTokens: agentConfig.maxTokens || 500,
-        tools: [] // Por ahora vacío, se agregará en Fase 3
+        tools: formattedTools
       });
 
       console.log(`[AI] Respuesta de OpenAI: ${response.text.substring(0, 50)}...`);
       console.log(`[AI] Tokens usados: ${response.usage.total_tokens}`);
 
-      // 7. Por ahora, solo respuestas directas (sin tools en Fase 2)
-      // En Fase 3 se agregará lógica de tool execution
+      // 9. ¿OpenAI quiere ejecutar tools?
+      if (response.toolCalls && response.toolCalls.length > 0) {
+        console.log(`[AI] OpenAI solicitó ${response.toolCalls.length} tool calls`);
 
-      // 8. Guardar en contexto conversacional
+        // 9a. Ejecutar todos los tools
+        const toolResults = await ToolExecutor.executeAll({
+          tenantId,
+          leadId,
+          toolCalls: response.toolCalls
+        });
+
+        console.log('[AI] Tools ejecutados, obteniendo respuesta final de OpenAI');
+
+        // 9b. Construir historial con el mensaje original y los tool calls
+        const historyWithToolCall = [
+          ...context.history,
+          { role: 'user', content: message },
+          {
+            role: 'assistant',
+            content: response.text || null,
+            tool_calls: response.toolCalls.map(tc => ({
+              id: tc.id,
+              type: 'function',
+              function: {
+                name: tc.toolName,
+                arguments: JSON.stringify(tc.parameters)
+              }
+            }))
+          }
+        ];
+
+        // 9c. Enviar resultados de tools de vuelta a OpenAI para respuesta final
+        const finalResponse = await openaiProvider.sendToolResults({
+          toolResults,
+          conversationHistory: historyWithToolCall,
+          model: agentConfig.model || 'gpt-4o'
+        });
+
+        console.log(`[AI] Respuesta final: ${finalResponse.text.substring(0, 50)}...`);
+
+        // 9d. Enviar respuesta final por WhatsApp
+        await sendMessageToLead(tenantId, leadData.telefono, finalResponse.text);
+
+        // 9e. Guardar en contexto conversacional
+        await contextManager.addInteraction(tenantId, leadId, {
+          userMessage: message,
+          aiResponse: finalResponse.text,
+          toolsUsed: toolResults.map(t => t.toolName),
+          tokensUsed: response.usage.total_tokens + finalResponse.usage.total_tokens
+        });
+
+        // 9f. Incrementar uso en rate limiter
+        await AIRateLimiter.incrementUsage(tenantId, leadId, 'message', {
+          tokens: response.usage.total_tokens + finalResponse.usage.total_tokens
+        });
+
+        return {
+          shouldHandleWithAI: true,
+          response: finalResponse.text
+        };
+      }
+
+      // 10. Sin tools: respuesta directa
+      console.log('[AI] Respuesta directa sin tools');
+
+      // Enviar respuesta por WhatsApp
+      await sendMessageToLead(tenantId, leadData.telefono, response.text);
+
+      // 11. Guardar en contexto conversacional
       await contextManager.addInteraction(tenantId, leadId, {
         userMessage: message,
         aiResponse: response.text,
@@ -71,7 +149,7 @@ export const aiAgentService = {
         tokensUsed: response.usage.total_tokens
       });
 
-      // 9. Incrementar uso en rate limiter
+      // 12. Incrementar uso en rate limiter
       await AIRateLimiter.incrementUsage(tenantId, leadId, 'message', {
         tokens: response.usage.total_tokens
       });

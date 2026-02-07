@@ -59,4 +59,10 @@ admin.initializeApp({
 // Obtén la instancia de Firestore
 const db = admin.firestore();
 
+// Helper para timestamps de Firestore
+export const now = () => admin.firestore.Timestamp.now();
+
+// Helper para FieldValue
+export const FieldValue = admin.firestore.FieldValue;
+
 export { admin, db };
