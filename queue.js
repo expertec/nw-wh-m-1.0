@@ -72,7 +72,7 @@ function normalizeJid(jid) {
   const num = normalizePhoneForWA(trimmed);
   return num ? `${num}@s.whatsapp.net` : null;
 }
-function normalizePhoneForWA(phone) {
+export function normalizePhoneForWA(phone) {
   let num = String(phone || '').replace(/\D/g, '');
   // 52 + 10 → forzar 521 + 10
   if (num.length === 12 && num.startsWith('52') && !num.startsWith('521')) {
