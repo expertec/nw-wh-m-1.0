@@ -32,7 +32,7 @@ export const contextManager = {
         // Revertir orden para tener mensajes cronológicos (más antiguo → más reciente)
         const docs = snapshot.docs.reverse();
 
-        for (const doc) {
+        for (const doc of docs) {
           const data = doc.data();
           history.push({
             role: data.role, // 'user' | 'assistant'
