@@ -43,6 +43,7 @@ import { processSequences } from './scheduler.js';
 
 // ================ AI Agent ================
 import aiAgentRoutes from './routes/aiAgentRoutes.js';
+import integrationsRoutes from './routes/integrationsRoutes.js';
 
 // ================ App base ================
 const app = express();
@@ -214,6 +215,9 @@ app.get('/', (_req, res) => {
 
 // ============== AI AGENT ROUTES ==============
 app.use('/api/ai-agent', aiAgentRoutes);
+
+// ============== INTEGRATIONS ROUTES ==============
+app.use('/api/integrations', integrationsRoutes);
 
 // ============== TENANT MANAGEMENT (superadmin) ==============
 

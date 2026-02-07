@@ -9,6 +9,7 @@ import { sendMessageToLead } from '../whatsappService.js';
 
 // Importar tools para que se auto-registren
 import '../tools/echo/EchoTool.js';
+import '../tools/google-calendar/CalendarTool.js';
 
 /**
  * Servicio principal del agente IA
