@@ -91,6 +91,12 @@ export default function AIAgentPage() {
       setCalendarStatus(data);
     } catch (error: any) {
       console.error('Error cargando estado de Calendar:', error);
+      // Si hay error (ej: Calendar no configurado), asumir que no está conectado
+      setCalendarStatus({
+        success: true,
+        connected: false,
+        message: 'Google Calendar no está conectado'
+      });
     }
   };
 

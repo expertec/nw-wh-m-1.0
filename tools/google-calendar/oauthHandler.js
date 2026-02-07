@@ -250,7 +250,12 @@ export class GoogleCalendarOAuth {
       };
     } catch (error) {
       console.error('[OAuth] Error obteniendo estado de conexión:', error);
-      throw new Error(`Error obteniendo estado: ${error.message}`);
+      // En lugar de lanzar error, retornar estado desconectado
+      return {
+        connected: false,
+        message: 'Error al verificar conexión de Google Calendar',
+        error: error.message
+      };
     }
   }
 }
