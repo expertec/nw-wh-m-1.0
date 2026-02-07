@@ -372,6 +372,48 @@ app.post('/api/whatsapp/disconnect', requireRole(['superadmin', 'admin']), async
   }
 });
 
+// Diagnóstico de sesiones (superadmin)
+app.get('/api/whatsapp/diagnostics', requireRole(['superadmin']), async (req, res) => {
+  try {
+    const authPath = process.env.AUTH_DATA_PATH || (process.env.NODE_ENV === 'production' ? '/var/data' : './auth_info');
+
+    // Obtener todos los tenants de Firestore
+    const tenantsSnap = await tenantsCol().get();
+    const tenants = tenantsSnap.docs.map(d => ({ id: d.id, nombre: d.data().nombre }));
+
+    const diagnostics = [];
+
+    for (const tenant of tenants) {
+      const tenantPath = path.join(authPath, tenant.id);
+      const hasSession = fs.existsSync(tenantPath);
+      const fileCount = hasSession ? fs.readdirSync(tenantPath).length : 0;
+      const hasCreds = hasSession && fs.existsSync(path.join(tenantPath, 'creds.json'));
+
+      diagnostics.push({
+        tenantId: tenant.id,
+        tenantName: tenant.nombre,
+        sessionPath: tenantPath,
+        hasSessionFolder: hasSession,
+        filesCount: fileCount,
+        hasCredentials: hasCreds,
+        status: getConnectionStatus(tenant.id),
+      });
+    }
+
+    return res.json({
+      authBasePath: authPath,
+      nodeEnv: process.env.NODE_ENV || 'development',
+      tenants: diagnostics,
+      diskInfo: {
+        message: 'Ejecuta en la shell de Render: df -h | grep /var/data'
+      }
+    });
+  } catch (err) {
+    console.error('Error en diagnóstico:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ============== WHATSAPP ROUTES ==============
 
 // WhatsApp status / número
