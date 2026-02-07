@@ -16,6 +16,7 @@ dotenv.config();
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // ================ Firebase / WhatsApp ================
+import { admin } from './firebaseAdmin.js';
 import { requireAuth, requireTenantMatch, requireRole } from './authMiddleware.js';
 import {
   DEFAULT_TENANT_ID,
@@ -103,7 +104,7 @@ app.get('/api/tenants/:id', async (req, res) => {
 // Crear tenant (superadmin)
 app.post('/api/tenants', requireRole(['superadmin']), async (req, res) => {
   try {
-    const { id, nombre, plan, ownerEmail } = req.body;
+    const { id, nombre, plan, ownerEmail, ownerPassword } = req.body;
     if (!id || !nombre) {
       return res.status(400).json({ error: 'Faltan id y nombre' });
     }
@@ -121,6 +122,7 @@ app.post('/api/tenants', requireRole(['superadmin']), async (req, res) => {
       createdAt: new Date(),
     };
 
+    // Crear tenant en Firestore
     await tenantDoc(id).set(tenantData);
 
     // Crear config por defecto del tenant
@@ -129,9 +131,118 @@ app.post('/api/tenants', requireRole(['superadmin']), async (req, res) => {
       defaultTriggerMetaAds: 'WebPromo',
     });
 
-    return res.status(201).json({ id, ...tenantData });
+    // Crear usuario admin para el tenant (si se proporciona email)
+    let createdUser = null;
+    let userCreationError = null;
+    if (ownerEmail) {
+      try {
+        // Generar password: mínimo 8 caracteres para cumplir requisitos de Firebase
+        const randomPart = Math.random().toString(36).slice(2, 10);
+        const password = ownerPassword || `${id}_${randomPart}`.substring(0, 20);
+
+        // Verificar que la contraseña tenga al menos 6 caracteres
+        if (password.length < 6) {
+          throw new Error('La contraseña debe tener al menos 6 caracteres');
+        }
+
+        const userRecord = await admin.auth().createUser({
+          email: ownerEmail,
+          password: password,
+          emailVerified: false,
+        });
+
+        // Asignar custom claims (role: admin, tenantId)
+        await admin.auth().setCustomUserClaims(userRecord.uid, {
+          role: 'admin',
+          tenantId: id,
+        });
+
+        createdUser = {
+          uid: userRecord.uid,
+          email: ownerEmail,
+          password: ownerPassword ? undefined : password, // Solo devolver password si fue autogenerado
+        };
+
+        console.log(`✅ Usuario admin creado para tenant ${id}: ${ownerEmail}`);
+      } catch (userErr) {
+        console.error('Error creando usuario admin:', userErr);
+        userCreationError = userErr.message || 'Error desconocido al crear usuario';
+        // No fallar la creación del tenant si falla el usuario
+      }
+    }
+
+    return res.status(201).json({
+      tenant: { id, ...tenantData },
+      createdUser: createdUser,
+      userCreationError: userCreationError,
+    });
   } catch (err) {
     console.error('Error creando tenant:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Sincronizar usuarios de Firebase Auth con tenants (superadmin)
+app.post('/api/tenants/sync-users', requireRole(['superadmin']), async (req, res) => {
+  try {
+    const tenantsSnap = await tenantsCol().get();
+    const tenants = tenantsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    const authUsers = await admin.auth().listUsers(1000);
+    const authEmails = new Set(authUsers.users.map(u => u.email));
+
+    const results = {
+      total: tenants.length,
+      created: [],
+      skipped: [],
+      errors: [],
+    };
+
+    for (const tenant of tenants) {
+      const { id, ownerEmail, nombre } = tenant;
+
+      if (!ownerEmail) {
+        results.skipped.push({ id, reason: 'Sin ownerEmail' });
+        continue;
+      }
+
+      if (authEmails.has(ownerEmail)) {
+        results.skipped.push({ id, email: ownerEmail, reason: 'Usuario ya existe' });
+        continue;
+      }
+
+      try {
+        const password = `${id}_${Math.random().toString(36).slice(2, 10)}`;
+        const userRecord = await admin.auth().createUser({
+          email: ownerEmail,
+          password: password,
+          emailVerified: false,
+          displayName: nombre || id,
+        });
+
+        await admin.auth().setCustomUserClaims(userRecord.uid, {
+          role: 'admin',
+          tenantId: id,
+        });
+
+        results.created.push({
+          tenantId: id,
+          email: ownerEmail,
+          password: password,
+          uid: userRecord.uid,
+        });
+      } catch (err) {
+        results.errors.push({
+          tenantId: id,
+          email: ownerEmail,
+          error: err.message,
+        });
+      }
+    }
+
+    return res.json(results);
+  } catch (err) {
+    console.error('Error sincronizando usuarios:', err);
     return res.status(500).json({ error: err.message });
   }
 });
