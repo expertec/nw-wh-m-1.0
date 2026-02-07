@@ -501,6 +501,230 @@ app.post('/api/whatsapp/mark-read', async (req, res) => {
   }
 });
 
+// ============== LEADS CRUD ==============
+
+// Listar leads
+app.get('/api/leads', async (req, res) => {
+  const tenantId = getTenantId(req);
+  const { estado, etiqueta, search, limit: lim = '100' } = req.query;
+  try {
+    let q = leadsCol(tenantId).orderBy('lastMessageAt', 'desc').limit(Math.min(+lim || 100, 500));
+    if (estado) q = leadsCol(tenantId).where('estado', '==', estado).orderBy('lastMessageAt', 'desc').limit(Math.min(+lim || 100, 500));
+    const snap = await q.get();
+    let leads = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (etiqueta) leads = leads.filter(l => Array.isArray(l.etiquetas) && l.etiquetas.includes(etiqueta));
+    if (search) {
+      const s = String(search).toLowerCase();
+      leads = leads.filter(l => (l.nombre || '').toLowerCase().includes(s) || (l.telefono || '').includes(s));
+    }
+    return res.json({ leads });
+  } catch (err) {
+    console.error('Error listando leads:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Obtener lead por ID
+app.get('/api/leads/:id', async (req, res) => {
+  const tenantId = getTenantId(req);
+  try {
+    const doc = await leadsCol(tenantId).doc(req.params.id).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Lead no encontrado' });
+    return res.json({ id: doc.id, ...doc.data() });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Actualizar lead
+app.patch('/api/leads/:id', async (req, res) => {
+  const tenantId = getTenantId(req);
+  const allowed = ['estado', 'etiquetas', 'nombre', 'seqPaused', 'stopSequences'];
+  const updates = {};
+  for (const key of allowed) {
+    if (req.body[key] !== undefined) updates[key] = req.body[key];
+  }
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: 'Sin campos válidos' });
+  }
+  try {
+    await leadsCol(tenantId).doc(req.params.id).update(updates);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Mensajes de un lead
+app.get('/api/leads/:id/messages', async (req, res) => {
+  const tenantId = getTenantId(req);
+  const { limit: lim = '100' } = req.query;
+  try {
+    const snap = await leadsCol(tenantId).doc(req.params.id)
+      .collection('messages')
+      .orderBy('timestamp', 'desc')
+      .limit(Math.min(+lim || 100, 500))
+      .get();
+    const messages = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    return res.json({ messages: messages.reverse() });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Activar secuencia para un lead
+app.post('/api/leads/:id/sequences', async (req, res) => {
+  const tenantId = getTenantId(req);
+  const { trigger } = req.body;
+  if (!trigger) return res.status(400).json({ error: 'Falta trigger' });
+  try {
+    const { scheduleSequenceForLead } = await import('./queue.js');
+    const count = await scheduleSequenceForLead(req.params.id, trigger, new Date(), tenantId);
+    return res.json({ success: true, stepsScheduled: count });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Cancelar secuencias de un lead
+app.delete('/api/leads/:id/sequences', async (req, res) => {
+  const tenantId = getTenantId(req);
+  try {
+    const { cancelAllSequences } = await import('./queue.js');
+    await cancelAllSequences(req.params.id, tenantId);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Pausar secuencias
+app.post('/api/leads/:id/pause', async (req, res) => {
+  const tenantId = getTenantId(req);
+  try {
+    const { pauseSequences } = await import('./queue.js');
+    await pauseSequences(req.params.id, tenantId);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Reanudar secuencias
+app.post('/api/leads/:id/resume', async (req, res) => {
+  const tenantId = getTenantId(req);
+  try {
+    const { resumeSequences } = await import('./queue.js');
+    await resumeSequences(req.params.id, tenantId);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ============== SEQUENCES CRUD ==============
+
+app.get('/api/sequences', async (req, res) => {
+  const tenantId = getTenantId(req);
+  try {
+    const snap = await secuenciasCol(tenantId).get();
+    const sequences = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    return res.json({ sequences });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/sequences/:id', async (req, res) => {
+  const tenantId = getTenantId(req);
+  try {
+    const doc = await secuenciasCol(tenantId).doc(req.params.id).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Secuencia no encontrada' });
+    return res.json({ id: doc.id, ...doc.data() });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sequences', requireRole(['superadmin', 'admin']), async (req, res) => {
+  const tenantId = getTenantId(req);
+  const { id, trigger, active, messages } = req.body;
+  if (!id || !trigger) return res.status(400).json({ error: 'Faltan id y trigger' });
+  try {
+    await secuenciasCol(tenantId).doc(id).set({
+      trigger,
+      active: active !== false,
+      messages: Array.isArray(messages) ? messages : [],
+      createdAt: new Date(),
+    });
+    return res.status(201).json({ id, trigger });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/sequences/:id', requireRole(['superadmin', 'admin']), async (req, res) => {
+  const tenantId = getTenantId(req);
+  const { trigger, active, messages } = req.body;
+  try {
+    const doc = await secuenciasCol(tenantId).doc(req.params.id).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Secuencia no encontrada' });
+    const updates = { updatedAt: new Date() };
+    if (trigger !== undefined) updates.trigger = trigger;
+    if (active !== undefined) updates.active = active;
+    if (messages !== undefined) updates.messages = messages;
+    await secuenciasCol(tenantId).doc(req.params.id).update(updates);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/sequences/:id', requireRole(['superadmin', 'admin']), async (req, res) => {
+  const tenantId = getTenantId(req);
+  try {
+    await secuenciasCol(tenantId).doc(req.params.id).delete();
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ============== DASHBOARD STATS ==============
+
+app.get('/api/dashboard/stats', async (req, res) => {
+  const tenantId = getTenantId(req);
+  try {
+    const allSnap = await leadsCol(tenantId).get();
+    const total = allSnap.size;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    let nuevosHoy = 0;
+    let conSecuencia = 0;
+    let sinLeer = 0;
+
+    allSnap.docs.forEach(d => {
+      const data = d.data();
+      const created = data.fecha_creacion?.toDate?.() || data.fecha_creacion;
+      if (created && new Date(created) >= today) nuevosHoy++;
+      if (data.hasActiveSequences) conSecuencia++;
+      if ((data.unreadCount || 0) > 0) sinLeer++;
+    });
+
+    return res.json({
+      totalLeads: total,
+      nuevosHoy,
+      conSecuenciaActiva: conSecuencia,
+      sinLeer,
+      whatsappStatus: getConnectionStatus(tenantId),
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ============== Arranque servidor + WA ==============
 app.listen(port, () => {
   console.log(`Servidor corriendo en puerto ${port}`);
