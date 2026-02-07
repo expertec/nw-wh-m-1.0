@@ -454,6 +454,24 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
   }
 });
 
+// Enviar mensaje de prueba (con número directo)
+app.post('/api/whatsapp/send-test-message', requireRole(['superadmin', 'admin']), async (req, res) => {
+  const { telefono, message } = req.body;
+  const tenantId = getTenantId(req);
+
+  if (!telefono || !message) {
+    return res.status(400).json({ error: 'Faltan telefono o message' });
+  }
+
+  try {
+    const result = await sendMessageToLead(tenantId, telefono, message);
+    return res.json(result);
+  } catch (error) {
+    console.error('Error enviando mensaje de prueba:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 // Enviar mensajes masivos
 app.post('/api/whatsapp/send-bulk-message', async (req, res) => {
   const { phones, messages } = req.body;
