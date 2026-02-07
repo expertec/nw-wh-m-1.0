@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Contacto - Solicita tu Cotización</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 500px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+            font-size: 14px;
+        }
+
+        input,
+        textarea,
+        select {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+
+        input:focus,
+        textarea:focus,
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .required {
+            color: #e74c3c;
+        }
+
+        button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .message {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-top: 20px;
+            display: none;
+            animation: slideIn 0.3s ease;
+        }
+
+        .message.show {
+            display: block;
+        }
+
+        .message.success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+
+        .message.error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .privacy {
+            font-size: 12px;
+            color: #999;
+            margin-top: 20px;
+            text-align: center;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Solicita tu Cotización</h1>
+        <p class="subtitle">Un asesor te guía y agenda visita.</p>
+
+        <form id="contactForm">
+            <div class="form-group">
+                <label for="nombre">
+                    Nombre completo <span class="required">*</span>
+                </label>
+                <input
+                    type="text"
+                    id="nombre"
+                    name="nombre"
+                    placeholder="Ana Martínez"
+                    required
+                >
+            </div>
+
+            <div class="form-group">
+                <label for="telefono">
+                    Teléfono / WhatsApp <span class="required">*</span>
+                </label>
+                <input
+                    type="tel"
+                    id="telefono"
+                    name="telefono"
+                    placeholder="+52 33 3333 3333"
+                    required
+                >
+            </div>
+
+            <div class="form-group">
+                <label for="email">Email</label>
+                <input
+                    type="email"
+                    id="email"
+                    name="email"
+                    placeholder="ana@example.com"
+                >
+            </div>
+
+            <div class="form-group">
+                <label for="ciudad">Ciudad del proyecto</label>
+                <input
+                    type="text"
+                    id="ciudad"
+                    name="ciudad"
+                    placeholder="Escribe o selecciona la ciudad"
+                >
+            </div>
+
+            <div class="form-group">
+                <label for="metrosCuadrados">
+                    Metros cuadrados (m²)
+                </label>
+                <select id="metrosCuadrados" name="metrosCuadrados">
+                    <option value="">Selecciona rango</option>
+                    <option value="0-50">0 - 50 m²</option>
+                    <option value="50-100">50 - 100 m²</option>
+                    <option value="100-200">100 - 200 m²</option>
+                    <option value="200-300">200 - 300 m²</option>
+                    <option value="300+">Más de 300 m²</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="mensaje">Mensaje adicional</label>
+                <textarea
+                    id="mensaje"
+                    name="mensaje"
+                    placeholder="Cuéntanos más sobre tu proyecto..."
+                ></textarea>
+            </div>
+
+            <button type="submit" id="submitBtn">
+                Solicitar cotización
+            </button>
+        </form>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p style="margin-top: 10px; color: #666;">Enviando...</p>
+        </div>
+
+        <div class="message" id="message"></div>
+
+        <p class="privacy">
+            Al enviar este formulario, aceptas que nos pongamos en contacto contigo por WhatsApp.
+        </p>
+    </div>
+
+    <script>
+        // ============================================
+        // 🔧 CONFIGURACIÓN - CAMBIAR ESTOS VALORES
+        // ============================================
+        const CONFIG = {
+            // Tu tenantId (requerido)
+            tenantId: 'axios',  // 👈 CAMBIAR por tu tenant
+
+            // Tu API Key (opcional pero recomendado)
+            // Genera una en: Settings → Webhook API Key
+            apiKey: '',  // 👈 OPCIONAL: 'tu-api-key-secreta'
+
+            // URL del webhook (dejar como está)
+            webhookUrl: 'https://nw-wh-m-1-0.onrender.com/api/webhook/lead',
+
+            // Mensajes personalizados
+            messages: {
+                success: '¡Gracias! Nos pondremos en contacto contigo pronto por WhatsApp.',
+                error: 'Hubo un error al enviar el formulario. Por favor, intenta de nuevo.',
+                invalidPhone: 'Por favor ingresa un número de teléfono válido.',
+                fieldRequired: 'Por favor completa todos los campos requeridos.',
+            }
+        };
+
+        // ============================================
+        // 📝 CÓDIGO DEL FORMULARIO
+        // ============================================
+        const form = document.getElementById('contactForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const loading = document.getElementById('loading');
+        const messageDiv = document.getElementById('message');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            // Validar campos requeridos
+            const nombre = document.getElementById('nombre').value.trim();
+            const telefono = document.getElementById('telefono').value.trim();
+
+            if (!nombre || !telefono) {
+                showMessage(CONFIG.messages.fieldRequired, 'error');
+                return;
+            }
+
+            // Validar teléfono (básico)
+            const phoneRegex = /[\d\s+()-]{10,}/;
+            if (!phoneRegex.test(telefono)) {
+                showMessage(CONFIG.messages.invalidPhone, 'error');
+                return;
+            }
+
+            // Preparar datos del formulario
+            const formData = new FormData(form);
+            const data = {};
+
+            formData.forEach((value, key) => {
+                if (value.trim()) {
+                    data[key] = value.trim();
+                }
+            });
+
+            // Agregar tenantId y apiKey
+            data.tenantId = CONFIG.tenantId;
+            if (CONFIG.apiKey) {
+                data.apiKey = CONFIG.apiKey;
+            }
+
+            // Mostrar loading
+            submitBtn.disabled = true;
+            loading.classList.add('active');
+            messageDiv.classList.remove('show');
+
+            try {
+                const response = await fetch(CONFIG.webhookUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data),
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.success) {
+                    // Éxito
+                    showMessage(CONFIG.messages.success, 'success');
+                    form.reset();
+
+                    // Opcional: Redireccionar después de 3 segundos
+                    // setTimeout(() => {
+                    //     window.location.href = '/gracias';
+                    // }, 3000);
+
+                } else {
+                    // Error del servidor
+                    showMessage(result.error || CONFIG.messages.error, 'error');
+                }
+
+            } catch (error) {
+                // Error de red
+                console.error('Error:', error);
+                showMessage(CONFIG.messages.error, 'error');
+            } finally {
+                // Ocultar loading
+                submitBtn.disabled = false;
+                loading.classList.remove('active');
+            }
+        });
+
+        function showMessage(text, type) {
+            messageDiv.textContent = text;
+            messageDiv.className = `message ${type} show`;
+
+            // Auto-ocultar mensaje de éxito después de 5 segundos
+            if (type === 'success') {
+                setTimeout(() => {
+                    messageDiv.classList.remove('show');
+                }, 5000);
+            }
+        }
+
+        // Validación en tiempo real del teléfono
+        document.getElementById('telefono').addEventListener('input', (e) => {
+            // Solo permitir números, espacios, +, -, (, )
+            e.target.value = e.target.value.replace(/[^0-9\s+()-]/g, '');
+        });
+    </script>
+</body>
+</html>
