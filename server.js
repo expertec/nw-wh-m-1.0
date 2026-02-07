@@ -349,12 +349,38 @@ app.post('/api/whatsapp/connect', requireRole(['superadmin', 'admin']), async (r
   }
 });
 
+// Desconectar WhatsApp (limpiar sesión para generar nuevo QR)
+app.post('/api/whatsapp/disconnect', requireRole(['superadmin', 'admin']), async (req, res) => {
+  try {
+    const tId = getTenantId(req);
+    const authPath = process.env.AUTH_DATA_PATH || (process.env.NODE_ENV === 'production' ? '/var/data' : './auth_info');
+    const localAuthFolder = path.join(authPath, tId);
+
+    // Eliminar archivos de sesión
+    if (fs.existsSync(localAuthFolder)) {
+      const files = fs.readdirSync(localAuthFolder);
+      for (const file of files) {
+        fs.rmSync(path.join(localAuthFolder, file), { force: true });
+      }
+      console.log(`🗑️  Sesión eliminada para tenant: ${tId}`);
+    }
+
+    return res.json({ success: true, message: `Sesión de WhatsApp limpiada para tenant ${tId}. Conecta nuevamente para generar un nuevo QR.` });
+  } catch (err) {
+    console.error('Error desconectando WA:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ============== WHATSAPP ROUTES ==============
 
 // WhatsApp status / número
 app.get('/api/whatsapp/status', (req, res) => {
   const tenantId = getTenantId(req);
-  res.json({ status: getConnectionStatus(tenantId), qr: getLatestQR(tenantId), tenantId });
+  const status = getConnectionStatus(tenantId);
+  const qr = getLatestQR(tenantId);
+  console.log(`📡 GET /api/whatsapp/status - tenant: ${tenantId}, status: ${status}, QR: ${qr ? qr.substring(0, 50) + '...' : 'null'}`);
+  res.json({ status, qr, tenantId });
 });
 
 app.get('/api/whatsapp/number', (req, res) => {

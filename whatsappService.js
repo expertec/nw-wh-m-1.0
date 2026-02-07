@@ -9,7 +9,8 @@ import {
   fetchLatestBaileysVersion,
   downloadMediaMessage,
 } from 'baileys';
-import QRCode from 'qrcode-terminal';
+import QRCodeTerminal from 'qrcode-terminal';
+import QRCode from 'qrcode';
 import Pino from 'pino';
 import fs from 'fs';
 import path from 'path';
@@ -41,7 +42,8 @@ import {
 
 
 const sessions = new Map(); // tenantId -> { sock, latestQR, connectionStatus, sessionPhone }
-const localAuthBase = '/var/data';
+// Usar ruta relativa en desarrollo, absoluta en producción
+const localAuthBase = process.env.AUTH_DATA_PATH || (process.env.NODE_ENV === 'production' ? '/var/data' : './auth_info');
 const { FieldValue } = admin.firestore;
 const bucket = admin.storage().bucket();
 
@@ -258,11 +260,20 @@ export async function connectToWhatsApp(tenantId = DEFAULT_TENANT_ID) {
     session.sock = sock;
 
     // ── eventos de conexión
-    sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
       if (qr) {
-        session.latestQR = qr;
-        session.connectionStatus = 'QR disponible. Escanéalo.';
-        QRCode.generate(qr, { small: true });
+        // Generar QR como data URL para el frontend
+        try {
+          session.latestQR = await QRCode.toDataURL(qr);
+          session.connectionStatus = 'QR disponible';
+          console.log(`✅ QR generado para tenant: ${tId} (${session.latestQR.substring(0, 50)}...)`);
+          // También mostrar en terminal para debug
+          QRCodeTerminal.generate(qr, { small: true });
+        } catch (err) {
+          console.error(`❌ Error generando QR para tenant ${tId}:`, err);
+          session.latestQR = null;
+          session.connectionStatus = 'Error generando QR';
+        }
       }
       if (connection === 'open') {
         session.connectionStatus = 'Conectado';

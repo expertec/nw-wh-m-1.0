@@ -49,7 +49,32 @@ Deberías ver:
 WhatsApp CRM Server escuchando en puerto 3001
 ```
 
-## 5. Verificar que funciona
+## 5. Configurar WhatsApp Multi-Tenant (Opcional)
+
+El sistema soporta múltiples conexiones de WhatsApp (una por tenant).
+
+### Carpeta de autenticación
+Las sesiones se guardan en:
+- **Desarrollo**: `./auth_info/{tenantId}/`
+- **Producción**: `/var/data/{tenantId}/`
+
+La carpeta se crea automáticamente al conectar WhatsApp.
+
+### Variables de entorno (opcional)
+Copia `.env.example` a `.env` y ajusta según necesites:
+
+```bash
+cp .env.example .env
+```
+
+Ejemplo de `.env`:
+```
+PORT=3001
+NODE_ENV=development
+AUTH_DATA_PATH=./auth_info
+```
+
+## 6. Verificar que funciona
 
 ### Opción A: Desde el frontend
 1. Inicia sesión como superadmin
