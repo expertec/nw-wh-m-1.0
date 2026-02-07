@@ -59,3 +59,9 @@ export function requireRole(roles = []) {
     return next();
   };
 }
+
+// Helper para obtener el tenantId del request
+// Asume que requireAuth o requireTenantMatch ya se ejecutaron
+export function getTenantId(req) {
+  return req.tenantId || req.user?.tenantId || DEFAULT_TENANT_ID;
+}
