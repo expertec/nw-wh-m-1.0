@@ -53,6 +53,145 @@ app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 
+// ============== WEBHOOK PÚBLICO - DEBE ESTAR ANTES DEL MIDDLEWARE DE AUTH ==============
+/**
+ * Endpoint público para capturar leads desde formularios web externos
+ * NO requiere autenticación JWT, solo validación de tenantId + apiKey
+ *
+ * IMPORTANTE: Este endpoint DEBE estar ANTES de app.use('/api', requireAuth)
+ * porque los formularios externos no tienen token de Firebase
+ */
+app.post('/api/webhook/lead', async (req, res) => {
+  try {
+    const { tenantId, apiKey, nombre, telefono, email, ciudad, metrosCuadrados, mensaje, ...customFields } = req.body;
+
+    // Validación de campos requeridos
+    if (!nombre || !telefono) {
+      return res.status(400).json({
+        error: 'Campos requeridos: nombre, telefono',
+        received: { nombre: !!nombre, telefono: !!telefono }
+      });
+    }
+
+    // ✅ API Key OBLIGATORIA para seguridad
+    if (!tenantId || !apiKey) {
+      return res.status(400).json({
+        error: 'Campos requeridos: tenantId, apiKey',
+        message: 'Por seguridad, este endpoint requiere autenticación. Genera tu API Key en Settings → Formularios Web'
+      });
+    }
+
+    // Validar API Key contra la config del tenant
+    try {
+      const configSnap = await configCol(tenantId).doc('appConfig').get();
+      const config = configSnap.exists ? configSnap.data() : {};
+
+      if (!config.webhookApiKey) {
+        return res.status(403).json({
+          error: 'Este tenant no tiene API Key configurada',
+          message: 'Genera tu API Key en Settings → Formularios Web'
+        });
+      }
+
+      if (config.webhookApiKey !== apiKey) {
+        console.warn(`[Webhook] ❌ API Key inválida para tenant: ${tenantId}`);
+        return res.status(403).json({ error: 'API Key inválida' });
+      }
+
+      console.log(`[Webhook] ✅ API Key validada para tenant: ${tenantId}`);
+    } catch (err) {
+      console.error(`[Webhook] Error validando apiKey:`, err);
+      return res.status(500).json({ error: 'Error validando apiKey' });
+    }
+
+    const resolvedTenantId = requireTenantId(tenantId);
+
+    // Normalizar teléfono
+    const { normalizePhoneForWA } = await import('./queue.js');
+    const normTelefono = normalizePhoneForWA(telefono);
+    const jid = `${normTelefono}@s.whatsapp.net`;
+    const leadId = `WA_${normTelefono}`;
+
+    // Verificar si el lead ya existe
+    const leadRef = leadsCol(resolvedTenantId).doc(leadId);
+    const leadSnap = await leadRef.get();
+
+    const now = () => admin.firestore.Timestamp.now();
+
+    // Obtener trigger por defecto del tenant
+    const configSnap = await configCol(resolvedTenantId).doc('appConfig').get();
+    const tenantConfig = configSnap.exists ? configSnap.data() : {};
+    const defaultTrigger = tenantConfig.defaultTrigger || 'NuevoLeadWeb';
+
+    const leadData = {
+      telefono: normTelefono,
+      nombre: nombre.trim(),
+      jid,
+      email: email || null,
+      ciudad: ciudad || null,
+      metrosCuadrados: metrosCuadrados || null,
+      mensaje: mensaje || null,
+      customFields: Object.keys(customFields).length > 0 ? customFields : null,
+      source: 'Formulario Web',
+      lastMessageAt: now(),
+    };
+
+    if (!leadSnap.exists) {
+      // Crear lead nuevo
+      await leadRef.set({
+        ...leadData,
+        fecha_creacion: now(),
+        estado: 'nuevo',
+        etiquetas: ['Web', defaultTrigger],
+        unreadCount: 0,
+        hasActiveSequences: false,
+        seqPaused: false,
+        secuenciasActivas: [],
+      });
+
+      console.log(`[Webhook] ✅ Lead creado: ${leadId} | tenant: ${resolvedTenantId} | trigger: ${defaultTrigger}`);
+
+      // Activar secuencia automática
+      try {
+        const { scheduleSequenceForLead } = await import('./queue.js');
+        await scheduleSequenceForLead(leadId, defaultTrigger, now(), resolvedTenantId);
+        console.log(`[Webhook] 🎯 Secuencia ${defaultTrigger} programada para ${leadId}`);
+      } catch (seqErr) {
+        console.error(`[Webhook] ⚠️  Error programando secuencia:`, seqErr);
+        // No fallar la request si la secuencia falla
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: 'Lead creado y secuencia activada',
+        leadId,
+        trigger: defaultTrigger,
+      });
+    } else {
+      // Lead existente: actualizar datos
+      await leadRef.update({
+        ...leadData,
+        lastMessageAt: now(),
+      });
+
+      console.log(`[Webhook] ✅ Lead actualizado: ${leadId} | tenant: ${resolvedTenantId}`);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Lead actualizado',
+        leadId,
+      });
+    }
+
+  } catch (err) {
+    console.error('[Webhook] ❌ Error procesando lead:', err);
+    return res.status(500).json({
+      error: 'Error interno del servidor',
+      details: err.message
+    });
+  }
+});
+
 // Auth (Firebase ID token → tenant + rol) + validación de tenant
 app.use('/api', requireAuth, requireTenantMatch);
 
@@ -695,157 +834,6 @@ app.post('/api/whatsapp/mark-read', async (req, res) => {
   } catch (err) {
     console.error('Error mark-read:', err);
     return res.status(500).json({ error: err.message });
-  }
-});
-
-// ============== WEBHOOK PÚBLICO - CAPTURA DE LEADS DESDE FORMULARIOS WEB ==============
-
-/**
- * Endpoint público para capturar leads desde formularios web externos
- * NO requiere autenticación JWT, pero sí validación de tenantId o apiKey
- *
- * Uso:
- * POST /api/webhook/lead
- * Body: {
- *   tenantId: "axios",           // Requerido (o usar apiKey)
- *   apiKey: "secret123",          // Opcional (más seguro que tenantId solo)
- *   nombre: "Juan Pérez",         // Requerido
- *   telefono: "+52 33 1234 5678", // Requerido
- *   email: "juan@example.com",    // Opcional
- *   ciudad: "Guadalajara",        // Opcional
- *   metrosCuadrados: "200",       // Opcional
- *   mensaje: "Quiero cotizar",    // Opcional
- *   // ... cualquier otro campo se guarda en customFields
- * }
- */
-app.post('/api/webhook/lead', async (req, res) => {
-  try {
-    const { tenantId, apiKey, nombre, telefono, email, ciudad, metrosCuadrados, mensaje, ...customFields } = req.body;
-
-    // Validación de campos requeridos
-    if (!nombre || !telefono) {
-      return res.status(400).json({
-        error: 'Campos requeridos: nombre, telefono',
-        received: { nombre: !!nombre, telefono: !!telefono }
-      });
-    }
-
-    // ✅ API Key OBLIGATORIA para seguridad
-    if (!tenantId || !apiKey) {
-      return res.status(400).json({
-        error: 'Campos requeridos: tenantId, apiKey',
-        message: 'Por seguridad, este endpoint requiere autenticación. Genera tu API Key en Settings → Formularios Web'
-      });
-    }
-
-    // Validar API Key contra la config del tenant
-    try {
-      const configSnap = await configCol(tenantId).doc('appConfig').get();
-      const config = configSnap.exists ? configSnap.data() : {};
-
-      if (!config.webhookApiKey) {
-        return res.status(403).json({
-          error: 'Este tenant no tiene API Key configurada',
-          message: 'Genera tu API Key en Settings → Formularios Web'
-        });
-      }
-
-      if (config.webhookApiKey !== apiKey) {
-        console.warn(`[Webhook] ❌ API Key inválida para tenant: ${tenantId}`);
-        return res.status(403).json({ error: 'API Key inválida' });
-      }
-
-      console.log(`[Webhook] ✅ API Key validada para tenant: ${tenantId}`);
-    } catch (err) {
-      console.error(`[Webhook] Error validando apiKey:`, err);
-      return res.status(500).json({ error: 'Error validando apiKey' });
-    }
-
-    const resolvedTenantId = requireTenantId(tenantId);
-
-    // Normalizar teléfono
-    const { normalizePhoneForWA } = await import('./queue.js');
-    const normTelefono = normalizePhoneForWA(telefono);
-    const jid = `${normTelefono}@s.whatsapp.net`;
-    const leadId = `WA_${normTelefono}`;
-
-    // Verificar si el lead ya existe
-    const leadRef = leadsCol(resolvedTenantId).doc(leadId);
-    const leadSnap = await leadRef.get();
-
-    const now = () => admin.firestore.Timestamp.now();
-
-    // Obtener trigger por defecto del tenant
-    const configSnap = await configCol(resolvedTenantId).doc('appConfig').get();
-    const tenantConfig = configSnap.exists ? configSnap.data() : {};
-    const defaultTrigger = tenantConfig.defaultTrigger || 'NuevoLeadWeb';
-
-    const leadData = {
-      telefono: normTelefono,
-      nombre: nombre.trim(),
-      jid,
-      email: email || null,
-      ciudad: ciudad || null,
-      metrosCuadrados: metrosCuadrados || null,
-      mensaje: mensaje || null,
-      customFields: Object.keys(customFields).length > 0 ? customFields : null,
-      source: 'Formulario Web',
-      lastMessageAt: now(),
-    };
-
-    if (!leadSnap.exists) {
-      // Crear lead nuevo
-      await leadRef.set({
-        ...leadData,
-        fecha_creacion: now(),
-        estado: 'nuevo',
-        etiquetas: ['Web', defaultTrigger],
-        unreadCount: 0,
-        hasActiveSequences: false,
-        seqPaused: false,
-        secuenciasActivas: [],
-      });
-
-      console.log(`[Webhook] ✅ Lead creado: ${leadId} | tenant: ${resolvedTenantId} | trigger: ${defaultTrigger}`);
-
-      // Activar secuencia automática
-      try {
-        const { scheduleSequenceForLead } = await import('./queue.js');
-        await scheduleSequenceForLead(leadId, defaultTrigger, now(), resolvedTenantId);
-        console.log(`[Webhook] 🎯 Secuencia ${defaultTrigger} programada para ${leadId}`);
-      } catch (seqErr) {
-        console.error(`[Webhook] ⚠️  Error programando secuencia:`, seqErr);
-        // No fallar la request si la secuencia falla
-      }
-
-      return res.status(201).json({
-        success: true,
-        message: 'Lead creado y secuencia activada',
-        leadId,
-        trigger: defaultTrigger,
-      });
-    } else {
-      // Lead existente: actualizar datos
-      await leadRef.update({
-        ...leadData,
-        lastMessageAt: now(),
-      });
-
-      console.log(`[Webhook] ✅ Lead actualizado: ${leadId} | tenant: ${resolvedTenantId}`);
-
-      return res.status(200).json({
-        success: true,
-        message: 'Lead actualizado',
-        leadId,
-      });
-    }
-
-  } catch (err) {
-    console.error('[Webhook] ❌ Error procesando lead:', err);
-    return res.status(500).json({
-      error: 'Error interno del servidor',
-      details: err.message
-    });
   }
 });
 
