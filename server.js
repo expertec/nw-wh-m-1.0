@@ -30,6 +30,7 @@ import {
 } from './tenantContext.js';
 import {
   connectToWhatsApp,
+  disconnectWhatsApp,
   getLatestQR,
   getConnectionStatus,
   sendMessageToLead,
@@ -498,23 +499,12 @@ app.post('/api/whatsapp/connect', requireRole(['superadmin', 'admin']), async (r
   }
 });
 
-// Desconectar WhatsApp (limpiar sesión para generar nuevo QR)
+// Desconectar WhatsApp (cerrar socket + limpiar sesión para generar nuevo QR)
 app.post('/api/whatsapp/disconnect', requireRole(['superadmin', 'admin']), async (req, res) => {
   try {
     const tId = getTenantId(req);
-    const authPath = process.env.AUTH_DATA_PATH || (process.env.NODE_ENV === 'production' ? '/var/data' : './auth_info');
-    const localAuthFolder = path.join(authPath, tId);
-
-    // Eliminar archivos de sesión
-    if (fs.existsSync(localAuthFolder)) {
-      const files = fs.readdirSync(localAuthFolder);
-      for (const file of files) {
-        fs.rmSync(path.join(localAuthFolder, file), { force: true });
-      }
-      console.log(`🗑️  Sesión eliminada para tenant: ${tId}`);
-    }
-
-    return res.json({ success: true, message: `Sesión de WhatsApp limpiada para tenant ${tId}. Conecta nuevamente para generar un nuevo QR.` });
+    await disconnectWhatsApp(tId);
+    return res.json({ success: true, message: `WhatsApp desconectado para tenant ${tId}. Conecta nuevamente para generar un nuevo QR.` });
   } catch (err) {
     console.error('Error desconectando WA:', err);
     return res.status(500).json({ error: err.message });

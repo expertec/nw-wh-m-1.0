@@ -291,6 +291,12 @@ export async function connectToWhatsApp(tenantId = DEFAULT_TENANT_ID) {
           }
           session.sessionPhone = null;
         }
+        // No reconectar si fue un disconnect manual
+        if (session.manualDisconnect) {
+          console.log(`[WA] Disconnect manual para ${tId}, no se reconecta automáticamente`);
+          session.manualDisconnect = false;
+          return;
+        }
         // Backoff más largo para Render
         const delay = Math.floor(Math.random() * 8000) + 5000;
         setTimeout(() => connectToWhatsApp(tId).catch(() => {}), delay);
@@ -821,6 +827,35 @@ export async function connectToWhatsApp(tenantId = DEFAULT_TENANT_ID) {
 
 
 /* ----------------------------- helpers envío ---------------------------- */
+export async function disconnectWhatsApp(tenantId = DEFAULT_TENANT_ID) {
+  const tId = requireTenantId(tenantId);
+  const session = sessions.get(tId);
+  if (session) {
+    session.manualDisconnect = true;
+    if (session.sock) {
+      try {
+        await session.sock.logout();
+      } catch (e) {
+        // Si logout falla, forzar cierre
+        try { session.sock.end(); } catch (_) {}
+      }
+      session.sock = null;
+    }
+    session.latestQR = null;
+    session.connectionStatus = 'Desconectado';
+    session.sessionPhone = null;
+  }
+
+  // Limpiar archivos de sesión
+  const localAuthFolder = path.join(localAuthBase, tId);
+  if (fs.existsSync(localAuthFolder)) {
+    for (const f of fs.readdirSync(localAuthFolder)) {
+      fs.rmSync(path.join(localAuthFolder, f), { force: true, recursive: true });
+    }
+  }
+  console.log(`🗑️  WhatsApp desconectado y sesión limpiada para tenant: ${tId}`);
+}
+
 export function getLatestQR(tenantId = DEFAULT_TENANT_ID) {
   return ensureSession(tenantId).latestQR;
 }
