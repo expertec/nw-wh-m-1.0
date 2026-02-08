@@ -1125,29 +1125,27 @@ app.get('/api/dashboard/stats', async (req, res) => {
 // ============== Arranque servidor + WA ==============
 app.listen(port, () => {
   console.log(`Servidor corriendo en puerto ${port}`);
-  console.log('ℹ️  WhatsApp NO se conecta automáticamente.');
-  console.log('ℹ️  Usa POST /api/whatsapp/connect para conectar manualmente.');
-
-  // DESACTIVADO: Auto-connect en startup
-  // Los negocios deben conectar manualmente usando el endpoint /api/whatsapp/connect
-  // Esto evita generar QR codes innecesarios para todos los tenants
-
-  /*
+  // Auto-connect: solo reconectar tenants que ya tienen sesión guardada
   (async () => {
     try {
       const tenants = await listActiveTenantIds();
       const targets = tenants.length ? tenants : [DEFAULT_TENANT_ID];
+      const authPath = process.env.AUTH_DATA_PATH || (process.env.NODE_ENV === 'production' ? '/var/data' : './auth_info');
       for (const t of targets) {
-        connectToWhatsApp(t).catch((err) =>
-          console.error(`Error al conectar WhatsApp tenant=${t} en startup:`, err)
-        );
+        const tenantAuthPath = path.join(authPath, t, 'creds.json');
+        if (fs.existsSync(tenantAuthPath)) {
+          console.log(`[WA] Auto-connect: reconectando tenant ${t} (sesión existente)`);
+          connectToWhatsApp(t).catch((err) =>
+            console.error(`Error al conectar WhatsApp tenant=${t} en startup:`, err)
+          );
+        } else {
+          console.log(`[WA] Skipping tenant ${t}: sin sesión guardada`);
+        }
       }
     } catch (err) {
       console.error('Error listando tenants para conectar WA:', err);
-      connectToWhatsApp(DEFAULT_TENANT_ID).catch(() => {});
     }
   })();
-  */
 });
 
 // ============== CRON JOBS ==============
