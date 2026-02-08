@@ -38,13 +38,16 @@ router.get('/google-calendar/auth-url', requireRole(['admin', 'superadmin']), as
 });
 
 /**
- * POST /api/integrations/google-calendar/callback
+ * GET/POST /api/integrations/google-calendar/callback
  * Callback de OAuth - procesa el código de autorización
- * Este endpoint puede ser llamado por el frontend o directamente por Google
+ * GET: Google redirige aquí después del consent screen
+ * POST: El frontend puede enviar el código manualmente
  */
-router.post('/google-calendar/callback', async (req, res) => {
+async function handleGoogleCallback(req, res) {
   try {
-    const { code, state } = req.body;
+    // GET: código viene en query params; POST: viene en body
+    const code = req.query.code || req.body?.code;
+    const state = req.query.state || req.body?.state;
 
     if (!code) {
       return res.status(400).json({
@@ -68,18 +71,49 @@ router.post('/google-calendar/callback', async (req, res) => {
 
     const result = await GoogleCalendarOAuth.handleCallback(code, tenantId, redirectUri);
 
+    // Si es GET (redirect de Google), mostrar página de éxito
+    if (req.method === 'GET') {
+      return res.send(`
+        <html><body style="font-family:sans-serif;text-align:center;padding:50px">
+          <h2>Google Calendar conectado exitosamente</h2>
+          <p>Cuenta: ${result.email}</p>
+          <p>Puedes cerrar esta ventana y volver a la aplicación.</p>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'google-calendar-connected', email: '${result.email}' }, '*');
+              setTimeout(() => window.close(), 3000);
+            }
+          </script>
+        </body></html>
+      `);
+    }
+
     return res.json({
       success: true,
       ...result
     });
   } catch (error) {
     console.error('[API] Error en callback de Google Calendar:', error);
+
+    if (req.method === 'GET') {
+      return res.send(`
+        <html><body style="font-family:sans-serif;text-align:center;padding:50px">
+          <h2>Error al conectar Google Calendar</h2>
+          <p>${error.message}</p>
+          <p>Puedes cerrar esta ventana e intentar de nuevo.</p>
+        </body></html>
+      `);
+    }
+
     return res.status(500).json({
       success: false,
       error: error.message
     });
   }
-});
+}
+
+router.get('/google-calendar/callback', handleGoogleCallback);
+router.post('/google-calendar/callback', handleGoogleCallback);
 
 /**
  * GET /api/integrations/google-calendar/status
@@ -157,8 +191,8 @@ router.get('/google-calendar/calendars', requireRole(['admin', 'superadmin']), a
     const tenantId = getTenantId(req);
 
     // Obtener credenciales
-    const { configCol } = await import('../tenantContext.js');
-    const doc = await configCol(tenantId)
+    const { tenantDoc } = await import('../tenantContext.js');
+    const doc = await tenantDoc(tenantId)
       .collection('integrations')
       .doc('google-calendar')
       .get();
@@ -211,8 +245,8 @@ router.get('/google-calendar/events', requireRole(['admin', 'superadmin']), asyn
     const { timeMin, timeMax, maxResults } = req.query;
 
     // Obtener credenciales
-    const { configCol } = await import('../tenantContext.js');
-    const doc = await configCol(tenantId)
+    const { tenantDoc } = await import('../tenantContext.js');
+    const doc = await tenantDoc(tenantId)
       .collection('integrations')
       .doc('google-calendar')
       .get();

@@ -197,6 +197,53 @@ app.post('/api/webhook/lead', async (req, res) => {
   }
 });
 
+// ============== GOOGLE OAUTH CALLBACK - PÚBLICO (antes de auth) ==============
+// Google redirige aquí después del consent screen, sin token Bearer
+import { GoogleCalendarOAuth } from './tools/google-calendar/oauthHandler.js';
+
+app.get('/api/integrations/google-calendar/callback', async (req, res) => {
+  try {
+    const { code, state } = req.query;
+
+    if (!code) {
+      return res.status(400).send('<h2>Error: Código de autorización no proporcionado</h2>');
+    }
+
+    const tenantId = state;
+    if (!tenantId) {
+      return res.status(400).send('<h2>Error: tenantId no proporcionado</h2>');
+    }
+
+    const redirectUri = process.env.GOOGLE_REDIRECT_URI ||
+      `${req.protocol}://${req.get('host')}/api/integrations/google-calendar/callback`;
+
+    const result = await GoogleCalendarOAuth.handleCallback(code, tenantId, redirectUri);
+
+    return res.send(`
+      <html><body style="font-family:sans-serif;text-align:center;padding:50px">
+        <h2>Google Calendar conectado exitosamente</h2>
+        <p>Cuenta: ${result.email}</p>
+        <p>Puedes cerrar esta ventana y volver a la aplicación.</p>
+        <script>
+          if (window.opener) {
+            window.opener.postMessage({ type: 'google-calendar-connected', email: '${result.email}' }, '*');
+            setTimeout(() => window.close(), 3000);
+          }
+        </script>
+      </body></html>
+    `);
+  } catch (error) {
+    console.error('[API] Error en Google OAuth callback:', error);
+    return res.send(`
+      <html><body style="font-family:sans-serif;text-align:center;padding:50px">
+        <h2>Error al conectar Google Calendar</h2>
+        <p>${error.message}</p>
+        <p>Puedes cerrar esta ventana e intentar de nuevo.</p>
+      </body></html>
+    `);
+  }
+});
+
 // Auth (Firebase ID token → tenant + rol) + validación de tenant
 app.use('/api', requireAuth, requireTenantMatch);
 
