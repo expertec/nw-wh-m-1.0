@@ -1,7 +1,7 @@
 import { ToolInterface } from '../base/ToolInterface.js';
 import { GoogleCalendarOAuth } from './oauthHandler.js';
 import { CalendarClient } from './calendarClient.js';
-import { configCol } from '../../tenantContext.js';
+import { tenantDoc } from '../../tenantContext.js';
 
 /**
  * Tool para agendar citas en Google Calendar
@@ -150,7 +150,7 @@ export class CalendarTool extends ToolInterface {
    */
   async getCredentials(tenantId) {
     try {
-      const doc = await configCol(tenantId)
+      const doc = await tenantDoc(tenantId)
         .collection('integrations')
         .doc('google-calendar')
         .get();

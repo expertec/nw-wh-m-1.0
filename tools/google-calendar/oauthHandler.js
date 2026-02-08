@@ -1,6 +1,6 @@
 import { google } from 'googleapis';
 import { encryptToken, decryptToken, encryptCredentials } from './tokenEncryption.js';
-import { configCol } from '../../tenantContext.js';
+import { tenantDoc } from '../../tenantContext.js';
 import { now } from '../../firebaseAdmin.js';
 
 /**
@@ -80,7 +80,7 @@ export class GoogleCalendarOAuth {
       );
 
       // Guardar en Firestore
-      await configCol(tenantId)
+      await tenantDoc(tenantId)
         .collection('integrations')
         .doc('google-calendar')
         .set({
@@ -150,7 +150,7 @@ export class GoogleCalendarOAuth {
     try {
       // Si no se pasan credenciales, leerlas de Firestore
       if (!credentials) {
-        const doc = await configCol(tenantId)
+        const doc = await tenantDoc(tenantId)
           .collection('integrations')
           .doc('google-calendar')
           .get();
@@ -183,7 +183,7 @@ export class GoogleCalendarOAuth {
         tenantId
       );
 
-      await configCol(tenantId)
+      await tenantDoc(tenantId)
         .collection('integrations')
         .doc('google-calendar')
         .update({
@@ -208,7 +208,7 @@ export class GoogleCalendarOAuth {
    */
   static async disconnect(tenantId) {
     try {
-      await configCol(tenantId)
+      await tenantDoc(tenantId)
         .collection('integrations')
         .doc('google-calendar')
         .delete();
@@ -227,7 +227,7 @@ export class GoogleCalendarOAuth {
    */
   static async getConnectionStatus(tenantId) {
     try {
-      const doc = await configCol(tenantId)
+      const doc = await tenantDoc(tenantId)
         .collection('integrations')
         .doc('google-calendar')
         .get();

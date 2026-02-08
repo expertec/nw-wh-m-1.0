@@ -74,8 +74,9 @@ export function aiContextCol(tenantId, leadId) {
 }
 
 // Colección de integraciones externas por tenant
+// Ruta: tenants/{tenantId}/integrations/{integrationName}
 export function integrationsCol(tenantId) {
-  return configCol(tenantId).collection('integrations');
+  return tenantDoc(tenantId).collection('integrations');
 }
 
 export { getTenantConfig, getTenantHashtags, getAgentConfig };
