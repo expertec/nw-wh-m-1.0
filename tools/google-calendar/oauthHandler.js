@@ -24,7 +24,8 @@ export class GoogleCalendarOAuth {
       access_type: 'offline', // Para obtener refresh token
       scope: [
         'https://www.googleapis.com/auth/calendar',
-        'https://www.googleapis.com/auth/calendar.events'
+        'https://www.googleapis.com/auth/calendar.events',
+        'https://www.googleapis.com/auth/userinfo.email'
       ],
       state: tenantId, // Para validar en el callback
       prompt: 'consent' // Fuerza el consent screen para obtener refresh token
