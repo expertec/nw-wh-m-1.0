@@ -1135,6 +1135,14 @@ app.get('/api/dashboard/stats', async (req, res) => {
 // ============== Arranque servidor + WA ==============
 app.listen(port, () => {
   console.log(`Servidor corriendo en puerto ${port}`);
+  console.log('ℹ️  WhatsApp NO se conecta automáticamente.');
+  console.log('ℹ️  Usa POST /api/whatsapp/connect para conectar manualmente.');
+
+  // DESACTIVADO: Auto-connect en startup
+  // Los negocios deben conectar manualmente usando el endpoint /api/whatsapp/connect
+  // Esto evita generar QR codes innecesarios para todos los tenants
+
+  /*
   (async () => {
     try {
       const tenants = await listActiveTenantIds();
@@ -1149,6 +1157,7 @@ app.listen(port, () => {
       connectToWhatsApp(DEFAULT_TENANT_ID).catch(() => {});
     }
   })();
+  */
 });
 
 // ============== CRON JOBS ==============
