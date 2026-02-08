@@ -672,6 +672,7 @@ export async function connectToWhatsApp(tenantId = DEFAULT_TENANT_ID) {
 
           // Mensajes de leads
           const cfg = await getTenantConfig(tId);
+          console.log(`[WA] 🔍 Config tenant ${tId}: aiAgentEnabled=${cfg.aiAgentEnabled}, content="${(content || '').substring(0, 50)}"`);
 
           // NUEVO: Interceptor del agente IA
           if (cfg.aiAgentEnabled) {
