@@ -117,7 +117,7 @@ export const aiAgentService = {
         console.log(`[AI] Respuesta final: ${finalResponse.text.substring(0, 50)}...`);
 
         // 9d. Enviar respuesta final por WhatsApp
-        await sendMessageToLead(tenantId, leadData.telefono, finalResponse.text);
+        await sendMessageToLead(tenantId, leadData.jid || leadData.telefono, finalResponse.text);
 
         // 9e. Guardar en contexto conversacional
         await contextManager.addInteraction(tenantId, leadId, {
@@ -142,7 +142,7 @@ export const aiAgentService = {
       console.log('[AI] Respuesta directa sin tools');
 
       // Enviar respuesta por WhatsApp
-      await sendMessageToLead(tenantId, leadData.telefono, response.text);
+      await sendMessageToLead(tenantId, leadData.jid || leadData.telefono, response.text);
 
       // 11. Guardar en contexto conversacional
       await contextManager.addInteraction(tenantId, leadId, {

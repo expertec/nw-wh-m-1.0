@@ -880,14 +880,15 @@ export async function sendMessageToLead(tenantId = DEFAULT_TENANT_ID, phoneOrJid
   const raw = String(phoneOrJid || '');
   const isJidInput = raw.includes('@');
   const normalizedInputJid = isJidInput ? normalizeJid(raw) : null;
-  const num = isJidInput ? phoneFromJid(normalizedInputJid) : normalizePhoneForWA(raw);
+  const isLidInput = normalizedInputJid && normalizedInputJid.endsWith('@lid');
+  const num = isJidInput && !isLidInput ? phoneFromJid(normalizedInputJid) : (!isJidInput ? normalizePhoneForWA(raw) : null);
 
   let leadId = normalizedInputJid || null;
-  // Solo usar JID directo si es @s.whatsapp.net, nunca @lid
-  const isValidWhatsAppJid = normalizedInputJid && normalizedInputJid.endsWith('@s.whatsapp.net');
-  let targetJid = isValidWhatsAppJid ? normalizedInputJid : (num ? `${num}@s.whatsapp.net` : null);
+  // @lid y @s.whatsapp.net son ambos válidos para enviar mensajes
+  let targetJid = normalizedInputJid || (num ? `${num}@s.whatsapp.net` : null);
   let leadData = null;
 
+  // Buscar lead en Firestore por JID (doc ID)
   if (normalizedInputJid) {
     const snap = await leadsCol(requireTenantId(tenantId)).doc(normalizedInputJid).get();
     if (snap.exists) {
@@ -896,6 +897,7 @@ export async function sendMessageToLead(tenantId = DEFAULT_TENANT_ID, phoneOrJid
     }
   }
 
+  // Buscar por teléfono si no encontramos por JID
   if (!leadData && num) {
     const q = await leadsCol(requireTenantId(tenantId)).where('telefono', '==', num).limit(1).get();
     if (!q.empty) {
@@ -904,22 +906,20 @@ export async function sendMessageToLead(tenantId = DEFAULT_TENANT_ID, phoneOrJid
     }
   }
 
+  // Resolver el mejor JID para enviar el mensaje
   if (leadData) {
-    // Priorizar resolvedJid/jid solo si son JIDs reales (@s.whatsapp.net)
-    // Evitar usar @lid como destino ya que no es un número real
+    // Prioridad: resolvedJid @s.whatsapp.net > jid @s.whatsapp.net > JID original del input
     const candidates = [leadData.resolvedJid, leadData.jid].filter(Boolean);
-    const validJid = candidates.find(j => {
-      const normalized = normalizeJid(j);
-      return normalized && normalized.endsWith('@s.whatsapp.net');
+    const whatsappJid = candidates.find(j => {
+      const n = normalizeJid(j);
+      return n && n.endsWith('@s.whatsapp.net');
     });
 
-    if (validJid) {
-      targetJid = normalizeJid(validJid);
-    } else if (leadData.telefono && !targetJid?.endsWith('@s.whatsapp.net')) {
-      // Fallback: construir JID desde el teléfono guardado del lead
-      const phoneNum = normalizePhoneForWA(leadData.telefono);
-      if (phoneNum) targetJid = `${phoneNum}@s.whatsapp.net`;
+    if (whatsappJid) {
+      targetJid = normalizeJid(whatsappJid);
     }
+    // Si no hay @s.whatsapp.net pero el input ya es un @lid, mantenerlo como target
+    // (Baileys soporta enviar a @lid en WhatsApp Business)
   }
 
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
