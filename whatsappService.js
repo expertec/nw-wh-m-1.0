@@ -834,11 +834,12 @@ export async function disconnectWhatsApp(tenantId = DEFAULT_TENANT_ID) {
     session.manualDisconnect = true;
     if (session.sock) {
       try {
-        await session.sock.logout();
+        session.sock.ev.removeAllListeners();
+        await session.sock.logout().catch(() => {});
       } catch (e) {
-        // Si logout falla, forzar cierre
-        try { session.sock.end(); } catch (_) {}
+        // Ignorar errores de logout
       }
+      try { session.sock.end(); } catch (_) {}
       session.sock = null;
     }
     session.latestQR = null;
@@ -846,14 +847,16 @@ export async function disconnectWhatsApp(tenantId = DEFAULT_TENANT_ID) {
     session.sessionPhone = null;
   }
 
-  // Limpiar archivos de sesión
+  // Eliminar carpeta de sesión completa (no solo archivos)
   const localAuthFolder = path.join(localAuthBase, tId);
   if (fs.existsSync(localAuthFolder)) {
-    for (const f of fs.readdirSync(localAuthFolder)) {
-      fs.rmSync(path.join(localAuthFolder, f), { force: true, recursive: true });
-    }
+    fs.rmSync(localAuthFolder, { recursive: true, force: true });
+    console.log(`🗑️  Carpeta de sesión eliminada: ${localAuthFolder}`);
   }
-  console.log(`🗑️  WhatsApp desconectado y sesión limpiada para tenant: ${tId}`);
+
+  // Eliminar sesión del Map para que connectToWhatsApp arranque desde cero
+  sessions.delete(tId);
+  console.log(`🗑️  WhatsApp desconectado y sesión completamente limpiada para tenant: ${tId}`);
 }
 
 export function getLatestQR(tenantId = DEFAULT_TENANT_ID) {
