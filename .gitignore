@@ -6,4 +6,3 @@ serviceAccountKey.json
 uploads/
 *.log
 .DS_Store
-client/
