@@ -153,11 +153,7 @@ export class OpenAIProvider {
       function: {
         name: tool.name,
         description: tool.description,
-        parameters: {
-          type: 'object',
-          properties: tool.parameters || {},
-          required: tool.required || []
-        }
+        parameters: tool.parameters || { type: 'object', properties: {} }
       }
     }));
   }
