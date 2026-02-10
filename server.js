@@ -626,13 +626,15 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
     return res.status(400).json({ error: 'Faltan leadId o message' });
 
   try {
-    const leadDoc = await leadsCol(tenantId).doc(leadId).get();
-    if (!leadDoc.exists)
+    const leadSnap = await leadsCol(tenantId).doc(leadId).get();
+    if (!leadSnap.exists)
       return res.status(404).json({ error: 'Lead no encontrado' });
-    const { telefono } = leadDoc.data() || {};
-    if (!telefono)
-      return res.status(400).json({ error: 'Lead sin teléfono' });
-    const result = await sendMessageToLead(tenantId, telefono, message);
+    const leadData = leadSnap.data() || {};
+    // Priorizar JID real sobre teléfono (para leads @lid)
+    const target = leadData.resolvedJid || leadData.jid || leadData.telefono;
+    if (!target)
+      return res.status(400).json({ error: 'Lead sin teléfono o JID' });
+    const result = await sendMessageToLead(tenantId, target, message);
     return res.json(result);
   } catch (error) {
     console.error('Error enviando WhatsApp:', error);
